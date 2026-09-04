@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube Recorder</title>
+  <style>
+    /* popup 为扩展独立页面，无污染页面样式问题，直接内联样式即可 */
+    :root {
+      color-scheme: light dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      width: 300px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+        'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      font-size: 14px;
+      color: #111111;
+      background: #ffffff;
+      padding: 16px;
+    }
+    @media (prefers-color-scheme: dark) {
+      body {
+        color: #f1f1f1;
+        background: #212121;
+      }
+      .yr-popup-desc {
+        color: #9c9c9c;
+      }
+      .yr-popup-btn {
+        background: #4c8dff;
+      }
+      .yr-popup-btn:hover {
+        background: #6ba1ff;
+      }
+      .yr-popup-status-ok {
+        color: #4caf50;
+      }
+      .yr-popup-status-err {
+        color: #ff5252;
+      }
+    }
+    .yr-popup-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 0 0 6px;
+    }
+    .yr-popup-desc {
+      font-size: 12px;
+      color: #8a8a8a;
+      line-height: 1.6;
+      margin: 0 0 14px;
+    }
+    .yr-popup-btn {
+      display: block;
+      width: 100%;
+      height: 40px;
+      border: none;
+      border-radius: 8px;
+      background: #1a73e8;
+      color: #ffffff;
+      font-size: 14px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .yr-popup-btn:hover {
+      background: #1765cc;
+    }
+    .yr-popup-status {
+      min-height: 18px;
+      margin-top: 10px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .yr-popup-status-ok {
+      color: #188038;
+    }
+    .yr-popup-status-err {
+      color: #c5221f;
+    }
+  </style>
+</head>
+<body>
+  <p class="yr-popup-title">YouTube Recorder</p>
+  <p class="yr-popup-desc">
+    在 YouTube 播放页打开录制面板。录制仅在你点击「开始录制」后触发，可裁剪播放器区域并保存为 webm。
+  </p>
+  <button id="yr-open-panel" class="yr-popup-btn" type="button">在页面中打开录制面板</button>
+  <div id="yr-popup-status" class="yr-popup-status" role="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

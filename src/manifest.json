@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Recorder",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "在 YouTube 播放页录制播放器区域画面与音频，输出 webm 到本地。录制仅由用户手动点击按钮触发，绝无后台静默捕获。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "tabCapture",
+    "downloads",
+    "activeTab",
+    "offscreen",
+    "storage"
+  ],
+  "action": {
+    "default_title": "YouTube Recorder（在播放页打开录制面板）",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content/ui.js", "content/content.js"],
+      "css": [],
+      "run_at": "document_idle"
+    }
+  ]
+}

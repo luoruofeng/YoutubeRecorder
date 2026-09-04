@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube Recorder 离屏录制核心</title>
+</head>
+<body>
+  <!--
+    离屏文档：承载 tabCapture → 隐藏 video → canvas 裁剪 → MediaRecorder。
+    由 background 按需创建（chrome.offscreen.createDocument），用户不可见。
+    禁止在 HTML 中使用内联脚本（MV3 CSP）。
+  -->
+  <script src="offscreen.js"></script>
+</body>
+</html>
