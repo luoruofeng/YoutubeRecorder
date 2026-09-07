@@ -17,6 +17,7 @@
   /** 状态文案（对应 offscreen 广播的 phase） */
   const PHASE_TEXT = {
     idle: '空闲',
+    countdown: '即将开始录制',
     capturing: '正在准备捕获…',
     recording: '正在录制',
     stopping: '正在组装视频…',
@@ -55,13 +56,23 @@
   /** content script 是否就绪（能 ping 通 = 已注入且确为 YouTube 页） */
   let tabReady = false;
   /** background 侧状态 */
-  let state = { phase: 'idle', startedAt: 0, durationMs: 0, error: null, notice: '' };
+  let state = {
+    phase: 'idle',
+    startedAt: 0,
+    durationMs: 0,
+    error: null,
+    notice: '',
+    countdownSec: 0,
+    countdownEndsAt: 0,
+  };
   /** 是否展示「强制复位」按钮（残留会话 / 启动失败时） */
   let showReset = false;
   /** 计时刷新定时器 */
   let tickTimer = null;
   /** 「开始 / 停止录制」快捷键配置（由 shared/hotkey.js 统一读写） */
   let hotkey = window.YRHotkey ? window.YRHotkey.normalize(window.YRHotkey.DEFAULT_COMBO) : null;
+  /** 「开始录制前倒计时」秒数（由 shared/countdown.js 统一读写） */
+  let countdownSec = window.YRCountdown ? window.YRCountdown.DEFAULT : 0;
 
   /** 当前环境能否原生录制 MP4（H.264/AAC） */
   const mp4Supported = detectMp4();
@@ -83,6 +94,13 @@
     const m = String(Math.floor(total / 60)).padStart(2, '0');
     const s = String(total % 60).padStart(2, '0');
     return m + ':' + s;
+  }
+
+  /** 倒计时剩余秒数（页面浮层与弹窗读的是同一个结束时间戳） */
+  function countdownLeft() {
+    const endsAt = Number(state.countdownEndsAt) || 0;
+    if (!endsAt) return 0;
+    return Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
   }
 
   /** 发消息给 background（无响应时返回空对象，绝不抛错） */
@@ -125,19 +143,32 @@
   function render() {
     const phase = state.phase || 'idle';
     const recording = phase === 'recording';
+    const counting = phase === 'countdown';
     const busy = phase === 'capturing' || phase === 'stopping' || phase === 'exported';
 
     els.state.textContent = PHASE_TEXT[phase] || PHASE_TEXT.idle;
     els.dot.className = 'yr-dot yr-dot-' + phase;
 
-    // 计时：录制中走实时，其它态展示上一次录制时长
-    const elapsed = recording && state.startedAt ? Date.now() - state.startedAt : state.durationMs || 0;
-    els.timer.hidden = !elapsed;
-    els.timer.textContent = formatClock(elapsed);
+    // 计时：倒计时态读剩余秒数，录制中走实时，其它态展示上一次录制时长
+    if (counting) {
+      const left = countdownLeft();
+      els.timer.hidden = false;
+      els.timer.textContent = '倒计时 ' + left + 's';
+    } else {
+      const elapsed = recording && state.startedAt ? Date.now() - state.startedAt : state.durationMs || 0;
+      els.timer.hidden = !elapsed;
+      els.timer.textContent = formatClock(elapsed);
+    }
 
-    // 主按钮：空闲可开始 / 录制中可停止 / 处理中禁用
+    // 主按钮：空闲可开始 / 倒计时中可取消 / 录制中可停止 / 处理中禁用
     els.primary.classList.toggle('yr-btn-stop', recording);
-    if (recording) {
+    els.primary.classList.toggle('yr-btn-cancel', counting);
+    if (counting) {
+      const left = countdownLeft();
+      els.primary.textContent = '取消倒计时' + (left > 0 ? '（' + left + 's）' : '');
+      els.primary.disabled = false;
+      if (els.select) els.select.hidden = true;
+    } else if (recording) {
       els.primary.textContent = '停止并保存';
       els.primary.disabled = false;
       if (els.select) els.select.hidden = true;
@@ -158,7 +189,15 @@
 
     // 录制中优先展示录制提示与「停止并保存」：即使当前打开的是另一个标签页，
     // 也必须能停止（停止是全局广播，不依赖当前页）
-    if (recording) {
+    if (counting) {
+      els.tip.textContent =
+        '页面正中央已显示倒计时，归零后才开始捕获（倒计时本身不会被录进视频）。' +
+        '趁这几秒把鼠标移开、切换全屏或调整播放器；' +
+        (hotkey && hotkey.enabled && hotkey.key
+          ? '反悔可再按一次快捷键 ' + window.YRHotkey.format(hotkey) + '、按 Esc 或'
+          : '反悔可按 Esc 或') +
+        '点上面的「取消倒计时」。';
+    } else if (recording) {
       els.tip.textContent =
         '录制中：页面已被遮罩锁定（视频播放控制可用，但请勿滚动页面 / 点击视频以外的元素），请保持该标签页可见、不要缩放窗口；结束请' +
         (hotkey && hotkey.enabled && hotkey.key
@@ -170,7 +209,10 @@
     } else {
       els.tip.textContent =
         '录制播放器区域画面与音频，' +
-        (mp4Supported ? '输出 MP4。' : '当前环境不支持原生 MP4，将输出 WebM。');
+        (mp4Supported ? '输出 MP4。' : '当前环境不支持原生 MP4，将输出 WebM。') +
+        (countdownSec > 0
+          ? '开始后先在页面上倒计时 ' + countdownSec + ' 秒再录制（可在设置中调整）。'
+          : '点击「开始录制」后立即开始（可在设置中开启倒计时）。');
     }
 
     const err = phase === 'error' ? state.error : null;
@@ -243,6 +285,11 @@
     renderHotkeyHint();
   }
 
+  async function loadCountdown() {
+    if (!window.YRCountdown) return;
+    countdownSec = await window.YRCountdown.read();
+  }
+
   if (els.settings) {
     els.settings.addEventListener('click', () => {
       if (window.YRSettings) window.YRSettings.open();
@@ -255,7 +302,15 @@
     const resp = await send({ type: 'YR_GET_STATE' });
     if (resp && resp.state) {
       state = Object.assign(
-        { phase: 'idle', startedAt: 0, durationMs: 0, error: null, notice: '' },
+        {
+          phase: 'idle',
+          startedAt: 0,
+          durationMs: 0,
+          error: null,
+          notice: '',
+          countdownSec: 0,
+          countdownEndsAt: 0,
+        },
         resp.state
       );
     }
@@ -281,10 +336,20 @@
 
   // ===================== 用户操作 =====================
 
+  /** 取消倒计时：撤掉页面浮层并回到空闲（不会开始录制） */
+  async function doCancelCountdown() {
+    els.primary.disabled = true;
+    await send({ type: 'YR_CANCEL_COUNTDOWN' });
+    await refreshState();
+    render();
+  }
+
   async function doStart() {
     showReset = false;
     // 乐观置为「准备中」：启动握手可能持续数秒，避免按钮看起来没反应
-    state.phase = 'capturing';
+    state.phase = countdownSec > 0 ? 'countdown' : 'capturing';
+    // 倒计时态先给一个乐观的结束时刻，等 background 回执后再按真实值刷新
+    state.countdownEndsAt = countdownSec > 0 ? Date.now() + countdownSec * 1000 : 0;
     state.error = null;
     state.notice = '';
     render();
@@ -324,7 +389,9 @@
   }
 
   els.primary.addEventListener('click', () => {
-    if ((state.phase || 'idle') === 'recording') doStop();
+    const phase = state.phase || 'idle';
+    if (phase === 'recording') doStop();
+    else if (phase === 'countdown') doCancelCountdown();
     else doStart();
   });
 
@@ -371,25 +438,31 @@
   (async function init() {
     await loadOffsets();
     await loadHotkey();
+    await loadCountdown();
     await detectTab();
     await refreshState();
     render();
-    // 在设置里改了快捷键 → 主界面提示即时刷新（页面侧由 content/hotkey.js 自行同步）
+    // 在设置里改了快捷键 / 倒计时 → 主界面提示即时刷新（页面侧由 content 自行同步）
     try {
       chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== 'sync' || !window.YRHotkey) return;
-        const change = changes[window.YRHotkey.STORAGE_KEY];
-        if (!change) return;
-        hotkey = window.YRHotkey.normalize(change.newValue);
-        renderHotkeyHint();
-        render();
+        if (area !== 'sync') return;
+        if (window.YRHotkey && changes[window.YRHotkey.STORAGE_KEY]) {
+          hotkey = window.YRHotkey.normalize(changes[window.YRHotkey.STORAGE_KEY].newValue);
+          renderHotkeyHint();
+          render();
+        }
+        if (window.YRCountdown && changes[window.YRCountdown.KEY]) {
+          countdownSec = window.YRCountdown.normalize(changes[window.YRCountdown.KEY].newValue);
+          render();
+        }
       });
     } catch (err) {
       /* 忽略：storage 不可用则维持初始配置 */
     }
-    // 录制中每 500ms 刷新一次计时；非录制态由广播驱动刷新
+    // 录制中 / 倒计时中每 500ms 刷新一次计时；其它态由广播驱动刷新
     tickTimer = window.setInterval(() => {
-      if ((state.phase || 'idle') === 'recording') render();
+      const phase = state.phase || 'idle';
+      if (phase === 'recording' || phase === 'countdown') render();
     }, 500);
   })();
 

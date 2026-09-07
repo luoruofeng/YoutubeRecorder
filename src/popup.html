@@ -56,6 +56,10 @@
       background: #e62117;
       animation: yr-pulse 1.2s ease-in-out infinite;
     }
+    .yr-dot-countdown {
+      background: #f29900;
+      animation: yr-pulse 1.2s ease-in-out infinite;
+    }
     .yr-dot-capturing,
     .yr-dot-stopping,
     .yr-dot-exported {
@@ -141,6 +145,23 @@
     }
     .yr-btn-stop:hover:not(:disabled) {
       background: #c71f16;
+    }
+    /* 倒计时中：主按钮变为「取消倒计时」，中性配色与「停止录制」的红色区分开 */
+    .yr-btn-cancel {
+      background: #f1f3f4;
+      color: #3c4043;
+    }
+    .yr-btn-cancel:hover:not(:disabled) {
+      background: #e4e6e9;
+    }
+    @media (prefers-color-scheme: dark) {
+      .yr-btn-cancel {
+        background: #3a3a3a;
+        color: #e8eaed;
+      }
+      .yr-btn-cancel:hover:not(:disabled) {
+        background: #464646;
+      }
     }
     .yr-btn:disabled {
       background: #ececec;
@@ -268,6 +289,7 @@
 
   <script src="shared/hotkey.js"></script>
   <script src="shared/indicator.js"></script>
+  <script src="shared/countdown.js"></script>
   <script src="popup/settings.js"></script>
   <script src="popup.js"></script>
 </body>

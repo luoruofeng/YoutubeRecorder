@@ -9,6 +9,8 @@
 
 > **补充变更（阶段九）**：录制期间会在页面里注入一层**交互锁定遮罩**（`content/guard.js`），用于禁止滚动 / 缩放告警 / 屏蔽点击与播放器快捷键，防止录制中途操作页面导致画面错位或录制中断。它采用「按播放器画面矩形挖洞」的聚光灯方案，**不会覆盖被录画面**，详见第 4 节。
 
+> **补充变更（阶段十一）**：新增**开始录制前倒计时**（默认 3 秒，设置页可调 0–10 秒）。它运行在**捕获开始之前**：页面浮层归零 → 先撤掉浮层 → 再开始捕获，因此倒计时本身绝不会进入成片（`content/countdown.js`），详见第 4.7 节。
+
 ---
 
 ## 1. 底层能力清单（任务 1）
@@ -71,14 +73,16 @@
 ```
 src/
 ├── manifest.json          # MV3 清单
-├── background.js          # Service Worker：消息路由、offscreen 生命周期、心跳、系统通知（阶段十）
+├── background.js          # Service Worker：消息路由、offscreen 生命周期、心跳、系统通知（阶段十）、倒计时启动链（阶段十一）
 ├── shared/
 │   ├── hotkey.js          # 「开始 / 停止录制」快捷键公共定义（popup / content 共用）
-│   └── indicator.js       # 全屏录制状态指示三开关（pip / notif / border）的读写（阶段十）
+│   ├── indicator.js       # 全屏录制状态指示三开关（pip / notif / border）的读写（阶段十）
+│   └── countdown.js       # 「开始录制前倒计时」秒数的读写（默认 3 秒，0–10；阶段十一）
 ├── content/
 │   ├── ui.js              # 【已废弃】注入层 UI 组件（已移入 popup）
 │   ├── guard.js           # 录制期页面交互锁定遮罩（按播放器画面矩形挖洞）+ 全屏黑边红框（阶段十）
 │   ├── pip.js             # 全屏 Document PiP 置顶状态窗：REC + 计时 + 停止按钮（阶段十）
+│   ├── countdown.js       # 开始录制前的页面倒计时浮层（环形进度 + 取消；捕获前必定撤除，阶段十一）
 │   └── content.js         # content script 主逻辑：定位播放器、上报矩形、开关遮罩
 ├── offscreen.html         # 离屏文档宿主（捕获/裁剪/录制/下载全在离屏完成）
 ├── offscreen.js           # tabCapture → 隐藏 video → canvas 裁剪 → MediaRecorder
@@ -110,9 +114,15 @@ src/
 
 **popup → background（录制控制入口）**
 - `{ type: 'YR_START', tabId }`：开始录制（**带回执**：background 确保离屏就绪并转发 `REC_START` 后，回复 `{ok:true}` / `{ok:false,busy:true,phase}` / `{ok:false,code,message}`；离屏未就绪时按 1.5s 节奏重发，上限约 9s）
-- `{ type: 'YR_STOP' }`：停止并保存（background 广播 `REC_STOP` 给离屏）
+- `{ type: 'YR_STOP' }`：停止并保存（background 广播 `REC_STOP` 给离屏）；若仍在倒计时则视为放弃本次录制
 - `{ type: 'YR_RESET' }`：强制复位残留会话后重新开始
-- `{ type: 'YR_GET_STATE' }`：弹窗打开/收到广播时回查 `{phase, startedAt, durationMs, error, notice, tabId}`
+- `{ type: 'YR_GET_STATE' }`：弹窗打开/收到广播时回查 `{phase, startedAt, durationMs, error, notice, tabId, countdownSec, countdownEndsAt}`
+- `{ type: 'YR_CANCEL_COUNTDOWN' }`：取消进行中的倒计时（弹窗 / 全屏 PiP 的「取消倒计时」按钮）
+
+**background ↔ content（阶段十一，开始录制前倒计时）**
+- `{ type: 'YR_COUNTDOWN_START', seconds }`：请页面显示倒计时浮层（带回执；页面不可用时 background 降级为立即开始）
+- `{ type: 'YR_COUNTDOWN_DONE' }`：页面倒计时归零**且浮层已从 DOM 移除**后发出，background 收到才真正开始捕获
+- `{ type: 'YR_COUNTDOWN_CANCEL' }`：双向取消（页面 Esc / 卡片按钮 → background；background 取消 → 页面撤浮层）
 
 **content ↔ background**
 - `{ type: 'YR_PING' }`：popup 经 `tabs.sendMessage` 探测页面脚本是否已注入（能回执即说明当前页是 YouTube 且脚本就绪）
@@ -287,6 +297,57 @@ macOS 全屏（独立 Space）下系统通知与 Document PiP 的浮层行为取
 
 ---
 
+## 4.7 开始录制前的倒计时（阶段十一）
+
+### 4.7.1 问题与约束
+
+| 目标 | 约束 |
+| --- | --- |
+| 点「开始录制」后留几秒把页面调整好（移开鼠标、切全屏、等控制条淡出） | 倒计时**绝不能**出现在成片里 |
+| 用户随时可以反悔 | 取消后不能残留任何状态 / 不能开始捕获 |
+| 不能因为倒计时把录制卡死 | 页面脚本异常 / 消息丢失 / 标签页关闭都要有确定行为 |
+
+### 4.7.2 为什么「先撤浮层、后开捕获」是唯一正确时序
+
+tabCapture 捕获整个标签页的合成画面，捕获期间任何页面浮层都会入画。因此倒计时不能放在
+「捕获已开始、靠裁剪区外摆放来避让」（guard.js 的思路）—— 它必须整体前移到**捕获之前**：
+
+```
+点开始 → 页面显示倒计时（捕获未开始，浮层可见且安全）
+       → 归零：淡出(160ms) → 移出 DOM → 等 SAFE_GAP(120ms)
+       → 页面发 YR_COUNTDOWN_DONE → background 才调用 getMediaStreamId() 开始捕获
+```
+
+由**页面**驱动而不是由 background 数秒，是因为只有页面能保证「浮层确实已移除」与
+「开始捕获」的先后次序；弹窗会失焦关闭、SW 会被回收，都不能承担这个时序保证。
+
+### 4.7.3 为什么不在点击时就申请 streamId
+
+`chrome.tabCapture.getMediaStreamId()` 返回的 ID **只能使用一次，未使用会在几秒钟后过期**
+（官方文档明确说明）。倒计时 3–10 秒后再消费，提前申请的 ID 必然失效，
+因此 `requestStart()` 一定在倒计时结束后才调用 `beginRecording()`。
+
+### 4.7.4 取消与兜底
+
+| 场景 | 处理 |
+| --- | --- |
+| Esc / 卡片「取消」按钮 | 页面发 `YR_COUNTDOWN_CANCEL` → background 撤状态回 `idle` |
+| 弹窗「取消倒计时」/ 全屏 PiP 按钮 | `YR_CANCEL_COUNTDOWN` → 通知页面撤浮层 + 回 `idle` |
+| 再按一次录制快捷键 | background 在 `countdown` phase 下视为取消（等同点取消） |
+| 页面脚本不可用（未注入 / 需刷新） | `YR_COUNTDOWN_START` 无回执 → **降级立即开始**，绝不卡住录制 |
+| 页面消息丢失 | background 兜底定时器（结束时刻 + 3s）强制开始，并先补发撤浮层指令 |
+| 标签页关闭 / 跳走 / SW 重启 | 取消倒计时并回到 `idle`（SW 重启后绝不替用户静默开始捕获） |
+
+### 4.7.5 呈现
+
+- 浮层锚定在播放器画面中央（直观提示「录的是这块」），播放器定位不到时退回视口中央；
+- 环形进度随剩余时间递减 + 大数字逐秒跳动（轻微缩放动画），下方「取消（Esc）」；
+- 浮层只是一层很淡的遮罩且不吃点击（倒计时正是留给用户「点全屏 / 调播放器」的时间），只有中央卡片接收点击；
+- 全屏时挂进 `document.fullscreenElement`（与 guard.js 同款宿主选择），全屏下同样可见；
+- 弹窗与全屏 PiP 小窗同步显示剩余秒数与「取消倒计时」按钮。
+
+---
+
 ## 5. 验收方式（任务 20）
 
 1. Chrome 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」选择 `src/`。
@@ -294,3 +355,4 @@ macOS 全屏（独立 Space）下系统通知与 Document PiP 的浮层行为取
 3. 按 TODO 阶段七 20.1~20.8 逐项验证（明暗主题、录制裁剪正确性、DPR、切页兜底、全屏跟随、DRM/异常提示、资源释放）。
 4. 代码静态自检：对 `src/` 下所有 JS 执行 `node --check`，`manifest.json` 用 `JSON.parse` 校验（见阶段七执行命令）。
 5. 遮罩专项：录制开始后页面被半透明遮罩盖住（播放器画面区域除外）、滚轮与快捷键无效、点不到任何按钮；点击「停止并保存」后遮罩立即消失、页面恢复可交互；输出视频中不含遮罩、不含提示文案。
+6. 倒计时专项（阶段十一）：点开始后播放器中央出现环形倒计时并逐秒递减；归零后浮层先消失、随即出现录制遮罩，成片首帧不含倒计时；Esc / 卡片「取消」/ 弹窗「取消倒计时」/ 再按快捷键均能回到空闲且不产出文件；设置改为 0 秒时点击后立即开始。

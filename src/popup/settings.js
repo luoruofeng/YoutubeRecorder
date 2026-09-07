@@ -51,6 +51,17 @@
     '.yr-set-key:hover:not(:disabled){border-color:rgba(26,115,232,.55);}' +
     '.yr-set-key:disabled{opacity:.55;cursor:not-allowed;}' +
     '.yr-set-key-capturing{border-color:#1a73e8;color:#1a73e8;background:rgba(26,115,232,.08);}' +
+    '.yr-set-count{display:flex;align-items:center;gap:8px;}' +
+    '.yr-set-num{width:64px;height:32px;padding:0 8px;border:1px solid rgba(0,0,0,.18);' +
+    'border-radius:8px;background:rgba(0,0,0,.03);color:inherit;font:inherit;font-size:13px;' +
+    'font-variant-numeric:tabular-nums;}' +
+    '.yr-set-unit{font-size:12px;color:#8a8a8a;}' +
+    '.yr-set-chips{display:flex;gap:6px;margin-top:8px;}' +
+    '.yr-set-chip{flex:1;height:28px;border:1px solid rgba(0,0,0,.18);border-radius:999px;' +
+    'background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer;' +
+    'transition:border-color .15s,color .15s,background .15s;}' +
+    '.yr-set-chip:hover{background:rgba(0,0,0,.05);}' +
+    '.yr-set-chip-active{border-color:#1a73e8;color:#1a73e8;background:rgba(26,115,232,.1);}' +
     '.yr-set-actions{display:flex;gap:8px;margin-top:8px;}' +
     '.yr-set-btn{flex:1;height:32px;border:1px solid rgba(0,0,0,.18);border-radius:8px;' +
     'background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer;}' +
@@ -73,14 +84,24 @@
     '.yr-set-key-capturing{border-color:#6ba1ff;color:#6ba1ff;background:rgba(107,161,255,.14);}' +
     '.yr-set-btn{border-color:rgba(255,255,255,.24);}' +
     '.yr-set-btn:hover{background:rgba(255,255,255,.08);}' +
+    '.yr-set-num{border-color:rgba(255,255,255,.24);background:rgba(255,255,255,.06);}' +
+    '.yr-set-chip{border-color:rgba(255,255,255,.24);}' +
+    '.yr-set-chip:hover{background:rgba(255,255,255,.08);}' +
+    '.yr-set-chip-active{border-color:#6ba1ff;color:#6ba1ff;background:rgba(107,161,255,.16);}' +
     '.yr-set-warn{background:rgba(255,152,0,.16);color:#ffcc80;}' +
     '}';
+
+  /** 「开始录制前倒计时」配置（shared/countdown.js；未加载时静默降级为不显示该分组） */
+  const CD = window.YRCountdown || null;
+  /** 快捷档位的显示文案（0 秒 = 立即开始） */
+  const CD_PRESET_TEXT = { 0: '立即', 3: '3 秒', 5: '5 秒', 10: '10 秒' };
 
   const S = {
     root: null,
     els: null,
     combo: HK.normalize(HK.DEFAULT_COMBO),
     ind: Object.assign({}, IND_DEFAULT), // 三个指示开关的当前值
+    countdown: CD ? CD.DEFAULT : 0, // 倒计时秒数
     capturing: false,
     warnTimer: null,
   };
@@ -136,6 +157,33 @@
     }
   }
 
+  // ===================== 开始录制倒计时（数据） =====================
+
+  function loadCountdown() {
+    if (!CD) return Promise.resolve();
+    return CD.read().then((value) => {
+      S.countdown = value;
+      renderCountdown();
+    });
+  }
+
+  function saveCountdown(value) {
+    if (!CD) return;
+    S.countdown = CD.normalize(value);
+    renderCountdown();
+    CD.write(S.countdown);
+  }
+
+  /** 同步输入框与快捷档位的高亮 */
+  function renderCountdown() {
+    if (!S.els || !S.els.countdown) return;
+    const { input, chips } = S.els.countdown;
+    if (input) input.value = String(S.countdown);
+    for (const chip of chips) {
+      chip.classList.toggle('yr-set-chip-active', Number(chip.dataset.value) === S.countdown);
+    }
+  }
+
   // ===================== DOM =====================
 
   function make(tag, cls, text) {
@@ -170,6 +218,52 @@
     head.appendChild(close);
 
     const body = make('div', 'yr-set-body');
+
+    // ===== 开始录制倒计时（默认 3 秒；倒计时在捕获前完成，不会被录进视频）=====
+
+    let countdownEls = null;
+    if (CD) {
+      body.appendChild(make('h2', 'yr-set-legend', '开始录制倒计时'));
+
+      const countRow = make('div', 'yr-set-count');
+      const numInput = document.createElement('input');
+      numInput.type = 'number';
+      numInput.id = 'yr-set-countdown';
+      numInput.min = String(CD.MIN);
+      numInput.max = String(CD.MAX);
+      numInput.step = '1';
+      numInput.value = String(S.countdown);
+      numInput.className = 'yr-set-num';
+      numInput.addEventListener('change', () => saveCountdown(numInput.value));
+      countRow.appendChild(numInput);
+      countRow.appendChild(make('span', 'yr-set-unit', '秒（0 = 立即开始）'));
+      body.appendChild(countRow);
+
+      const chipsRow = make('div', 'yr-set-chips');
+      const chips = [];
+      for (const preset of CD.PRESETS) {
+        const chip = make('button', 'yr-set-chip', CD_PRESET_TEXT[preset] || preset + ' 秒');
+        chip.type = 'button';
+        chip.dataset.value = String(preset);
+        chip.addEventListener('click', () => saveCountdown(preset));
+        chipsRow.appendChild(chip);
+        chips.push(chip);
+      }
+      body.appendChild(chipsRow);
+
+      body.appendChild(
+        make(
+          'p',
+          'yr-set-tip',
+          '点击「开始录制」后，播放器中央先出现倒计时圆环，归零时才真正开始捕获 —— 这几秒可以' +
+            '把鼠标移开、切换全屏或调整播放器。倒计时在捕获开始前就撤掉了，绝不会被录进视频；' +
+            '倒计时途中可点卡片上的「取消」、按 Esc，或再按一次录制快捷键放弃本次录制。'
+        )
+      );
+      countdownEls = { input: numInput, chips };
+    }
+
+    body.appendChild(make('hr', 'yr-set-divider'));
     body.appendChild(make('h2', 'yr-set-legend', '录制快捷键'));
 
     const toggle = document.createElement('input');
@@ -282,7 +376,8 @@
     document.body.appendChild(root);
 
     S.root = root;
-    S.els = { toggle, key, warn, inds };
+    S.els = { toggle, key, warn, inds, countdown: countdownEls };
+    renderCountdown(); // 挡位高亮（读取是异步的，DOM 建好后先按当前值渲染一次）
   }
 
   // ===================== 渲染 =====================
@@ -366,6 +461,7 @@
       S.ind = value;
       renderInd();
     });
+    loadCountdown();
     S.root.hidden = false;
     document.body.classList.add('yr-settings-open');
     document.addEventListener('keydown', onDocKeyWhileOpen, true);

@@ -43,6 +43,7 @@
     phase: 'idle', // 最近同步的录制 phase
     startedAt: 0, // 录制开始时间戳（进入 recording 的时刻）
     durationMs: 0, // 最近一次录制时长
+    countdownEndsAt: 0, // 倒计时结束时间戳（countdown 阶段有效）
     els: null, // 小窗内元素（dot / title / timer / stop / tip）
     tickTimer: null, // 计时刷新定时器
     closeTimer: null, // 结束后的延迟关闭
@@ -121,8 +122,10 @@
     );
     stop.type = 'button';
     stop.addEventListener('click', () => {
+      // 倒计时阶段该按钮是「取消倒计时」，其余阶段是「停止并保存」
+      const type = S.phase === 'countdown' ? 'YR_CANCEL_COUNTDOWN' : 'YR_STOP';
       try {
-        chrome.runtime.sendMessage({ type: 'YR_STOP' }, () => void chrome.runtime.lastError);
+        chrome.runtime.sendMessage({ type }, () => void chrome.runtime.lastError);
       } catch (err) {
         /* 扩展上下文失效：忽略 */
       }
@@ -142,6 +145,18 @@
     const phase = S.phase;
     const recording = phase === 'recording';
 
+    // 按钮文案按阶段切换（倒计时态是「取消倒计时」）
+    els.stop.textContent = phase === 'countdown' ? '取消倒计时' : '停止并保存';
+
+    if (phase === 'countdown') {
+      els.title.textContent = '即将开始录制…';
+      els.stop.disabled = false;
+      els.dot.style.background = '#ffb020';
+      els.tip.textContent = '倒计时归零后自动开始 · 本窗口不会进入视频';
+      els.timer.textContent = Math.max(0, Math.ceil((S.countdownEndsAt - Date.now()) / 1000)) + 's';
+      startTick(); // 复用计时刷新：倒计时读的是剩余秒数
+      return;
+    }
     if (phase === 'preparing' || phase === 'capturing') {
       els.title.textContent = '正在启动录制…';
       els.timer.textContent = '';
@@ -181,6 +196,7 @@
     S.phase = state.phase || S.phase;
     if (typeof state.startedAt === 'number') S.startedAt = state.startedAt;
     if (typeof state.durationMs === 'number') S.durationMs = state.durationMs;
+    if (typeof state.countdownEndsAt === 'number') S.countdownEndsAt = state.countdownEndsAt;
     if (S.pipWindow) applyUi();
   }
 
@@ -188,8 +204,13 @@
     if (S.tickTimer) return;
     S.tickTimer = window.setInterval(() => {
       if (!S.pipWindow || !S.els) return;
-      const secs = S.startedAt > 0 ? Math.floor((Date.now() - S.startedAt) / 1000) : 0;
-      S.els.timer.textContent = formatClock(secs);
+      if (S.phase === 'countdown') {
+        const left = Math.max(0, Math.ceil((S.countdownEndsAt - Date.now()) / 1000));
+        S.els.timer.textContent = left + 's';
+      } else {
+        const secs = S.startedAt > 0 ? Math.floor((Date.now() - S.startedAt) / 1000) : 0;
+        S.els.timer.textContent = formatClock(secs);
+      }
       // 呼吸效果由红点透明度模拟（PiP 文档无动画关键帧依赖，用 JS 更稳）
       S.els.dot.style.opacity = S.els.dot.style.opacity === '0.35' ? '1' : '0.35';
     }, 500);

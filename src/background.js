@@ -51,17 +51,20 @@
 
   /** 最近一次已知状态 */
   let yrState = {
-    phase: 'idle', // idle | capturing | recording | stopping | exported | error
+    phase: 'idle', // idle | countdown | capturing | recording | stopping | exported | error
     startedAt: 0, // 进入 recording 的时刻（弹窗据此计时）
     durationMs: 0, // 最近一次录制时长（结束后保留展示）
     error: null, // { title, message }
     notice: '', // 最近一条提示文案（toast / 模态框）
+    countdownSec: 0, // 倒计时总秒数（仅 countdown 阶段有效）
+    countdownEndsAt: 0, // 倒计时结束时间戳（弹窗据此显示剩余秒数）
     updatedAt: 0,
   };
 
   /** 图标徽标：不用打开弹窗也能看到当前状态 */
   const BADGE_BY_PHASE = {
     idle: { text: '', color: '#1a73e8' },
+    countdown: { text: '···', color: '#f29900' },
     capturing: { text: '···', color: '#8a8a8a' },
     recording: { text: 'REC', color: '#e62117' },
     stopping: { text: '···', color: '#8a8a8a' },
@@ -153,6 +156,9 @@
     .catch(() => {})
     .then(() => {
       if (yrState.phase === 'recording') showRecordingNotif();
+      // SW 重启后倒计时已失去驱动（计时在页面侧，SW 侧无法续跑）：回到空闲，
+      // 由用户重新点击开始，绝不静默替用户启动捕获。
+      if (yrState.phase === 'countdown') setPhase('idle', { error: null, notice: '' });
     });
 
   function persistState() {
@@ -187,6 +193,11 @@
       clearNotif(NOTIF_REC_ID);
     }
     if (phase === 'idle' || phase === 'error') yrState.startedAt = 0;
+    // 倒计时字段只在 countdown 阶段有意义，离开该阶段即清零（弹窗据此停止读秒）
+    if (phase !== 'countdown') {
+      yrState.countdownSec = 0;
+      yrState.countdownEndsAt = 0;
+    }
     yrState.phase = phase;
     if (extra) Object.assign(yrState, extra);
     updateBadge(phase);
@@ -212,6 +223,7 @@
         phase: yrState.phase,
         startedAt: yrState.startedAt,
         durationMs: yrState.durationMs,
+        countdownEndsAt: yrState.countdownEndsAt || 0,
       })
       .catch(() => {});
   }
@@ -552,6 +564,196 @@
     });
   }
 
+  // ===================== 开始录制前的倒计时（阶段十一） =====================
+  //
+  // 点「开始录制」时用户往往还没把页面调整好（鼠标压在播放器上、控制条还亮着、
+  // 还没切全屏）。倒计时在**捕获开始之前**进行：页面浮层归零 → 先撤掉浮层 →
+  // 再开始捕获，因此倒计时本身绝不会被录进视频。
+  //
+  // 由页面（content/countdown.js）驱动是刻意的：只有页面能保证「浮层已移除」与
+  // 「开始捕获」的先后顺序。background 侧只保留兜底定时器与取消入口，
+  // 且页面脚本不可用时直接降级为立即开始 —— 倒计时绝不能把录制卡死。
+
+  /** 倒计时配置键与默认值（与 shared/countdown.js 保持一致；SW 不加载共享脚本） */
+  const COUNTDOWN_KEY = 'yrCountdownSec';
+  const COUNTDOWN_DEFAULT = 3;
+  const COUNTDOWN_MIN = 0;
+  const COUNTDOWN_MAX = 10;
+  /** 兜底定时器相对倒计时结束的宽限（ms）：页面消息丢失时仍能开始录制 */
+  const COUNTDOWN_GRACE_MS = 3000;
+
+  /** 倒计时运行态 */
+  const countdown = {
+    active: false,
+    tabId: null,
+    endsAt: 0,
+    timer: null, // 兜底定时器
+    token: 0, // 每次启动自增：作废上一轮遗留的定时器与回执
+  };
+
+  /** 读取用户设置的倒计时秒数（0 = 关闭，直接开始） */
+  function readCountdownSec() {
+    return new Promise((resolve) => {
+      try {
+        if (!chrome.storage || !chrome.storage.sync) {
+          resolve(COUNTDOWN_DEFAULT);
+          return;
+        }
+        chrome.storage.sync.get(COUNTDOWN_KEY, (data) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            resolve(COUNTDOWN_DEFAULT);
+            return;
+          }
+          const n = Number(data ? data[COUNTDOWN_KEY] : NaN);
+          if (!Number.isFinite(n)) {
+            resolve(COUNTDOWN_DEFAULT);
+            return;
+          }
+          const rounded = Math.round(n);
+          resolve(Math.min(COUNTDOWN_MAX, Math.max(COUNTDOWN_MIN, rounded)));
+        });
+      } catch (err) {
+        resolve(COUNTDOWN_DEFAULT);
+      }
+    });
+  }
+
+  function clearCountdownTimer() {
+    if (countdown.timer) {
+      clearTimeout(countdown.timer);
+      countdown.timer = null;
+    }
+  }
+
+  /** 通知页面撤掉倒计时浮层（幂等：页面已结束时无副作用） */
+  function sendCountdownCancelToTab(tabId) {
+    if (typeof tabId !== 'number') return;
+    chrome.tabs.sendMessage(tabId, { type: 'YR_COUNTDOWN_CANCEL' }).catch(() => {});
+  }
+
+  /** 请页面显示倒计时浮层（页面脚本不可用时返回 false，调用方降级为立即开始） */
+  function requestCountdownOnTab(tabId, seconds) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        resolve(ok);
+      };
+      try {
+        chrome.tabs.sendMessage(tabId, { type: 'YR_COUNTDOWN_START', seconds }, (resp) => {
+          if (chrome.runtime.lastError) finish(false);
+          else finish(!!(resp && resp.ok));
+        });
+      } catch (err) {
+        finish(false);
+      }
+      // 注意：service worker 里没有 window，必须用全局 setTimeout
+      setTimeout(() => finish(false), 1200);
+    });
+  }
+
+  /** 进入倒计时态（页面浮层已确认显示） */
+  function beginCountdown(tabId, seconds) {
+    countdown.active = true;
+    countdown.tabId = tabId;
+    countdown.endsAt = Date.now() + seconds * 1000;
+    countdown.token += 1;
+    const token = countdown.token;
+    activeTabId = tabId; // 让弹窗 / 全屏状态窗的广播能找到该标签页
+    setPhase('countdown', {
+      error: null,
+      notice: '',
+      durationMs: 0,
+      countdownSec: seconds,
+      countdownEndsAt: countdown.endsAt,
+    });
+    // 兜底：页面消息丢失（脚本异常 / 浮层被卸载）时也要把录制启动起来
+    clearCountdownTimer();
+    countdown.timer = setTimeout(() => {
+      countdown.timer = null;
+      if (token !== countdown.token || !countdown.active) return;
+      finishCountdown(true);
+    }, seconds * 1000 + COUNTDOWN_GRACE_MS);
+  }
+
+  /**
+   * 倒计时结束 → 真正开始录制。
+   * fallback=true 表示由兜底定时器触发：先让页面撤掉浮层并留一点余量，
+   * 同时确认标签页仍然存在，避免对已关闭的页面发起录制。
+   */
+  function finishCountdown(fallback) {
+    if (!countdown.active) return;
+    const tabId = countdown.tabId;
+    clearCountdownTimer();
+    countdown.active = false;
+    countdown.tabId = null;
+    countdown.endsAt = 0;
+    countdown.token += 1;
+
+    const noop = function () {};
+    if (!fallback) {
+      beginRecording(tabId, noop);
+      return;
+    }
+    sendCountdownCancelToTab(tabId);
+    const start = () => beginRecording(tabId, noop);
+    try {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          setPhase('idle', { error: null, notice: '' });
+          return;
+        }
+        setTimeout(start, 300); // 给页面撤浮层留出时间
+      });
+    } catch (err) {
+      setTimeout(start, 300);
+    }
+  }
+
+  /** 取消倒计时（用户主动取消 / 复位 / 停止）：撤掉浮层并回到空闲 */
+  function cancelCountdown(notice) {
+    if (!countdown.active) return false;
+    const tabId = countdown.tabId;
+    clearCountdownTimer();
+    countdown.active = false;
+    countdown.tabId = null;
+    countdown.endsAt = 0;
+    countdown.token += 1;
+    sendCountdownCancelToTab(tabId);
+    setPhase('idle', { error: null, notice: notice || '' });
+    return true;
+  }
+
+  /**
+   * 「开始录制」统一入口（供弹窗与页面快捷键共用）：
+   * 先读用户设置的倒计时秒数，> 0 则先走页面倒计时，为 0 或页面不可用时立即开始。
+   *
+   * 注意：streamId 一定在倒计时结束后才申请 —— getMediaStreamId 返回的 ID
+   * 「只能使用一次，未使用会在几秒钟后过期」，提前申请必然失效。
+   */
+  function requestStart(targetTabId, respondStart) {
+    if (!targetTabId) {
+      respondStart({ ok: false, code: 'no-tab', message: '未找到当前标签页，无法开始录制。' });
+      return;
+    }
+    readCountdownSec().then((seconds) => {
+      if (seconds <= 0) {
+        beginRecording(targetTabId, respondStart);
+        return;
+      }
+      requestCountdownOnTab(targetTabId, seconds).then((shown) => {
+        if (!shown) {
+          // 页面脚本不可用（未注入 / 需刷新）：降级为立即开始，绝不因倒计时卡住录制
+          beginRecording(targetTabId, respondStart);
+          return;
+        }
+        beginCountdown(targetTabId, seconds);
+        respondStart({ ok: true, countdown: seconds, phase: 'countdown' });
+      });
+    });
+  }
+
   // ===================== 消息路由 =====================
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -567,8 +769,37 @@
         const targetTabId = message.tabId || (sender.tab && sender.tab.id);
 
         console.log('[YR-bg] 收到 YR_START → tab=' + targetTabId);
-        beginRecording(targetTabId, respondStart);
+        requestStart(targetTabId, respondStart);
         return true; // 异步回执
+      }
+
+      case 'YR_CANCEL_COUNTDOWN': {
+        // 弹窗 / 全屏状态窗点「取消倒计时」：撤掉页面浮层并回到空闲
+        console.log('[YR-bg] 收到 YR_CANCEL_COUNTDOWN');
+        cancelCountdown('已取消本次录制（倒计时未结束，未开始捕获）。');
+        try {
+          sendResponse({ ok: true });
+        } catch (err) {
+          /* ignore */
+        }
+        break;
+      }
+
+      case 'YR_COUNTDOWN_DONE': {
+        // 页面倒计时归零且浮层已移除 → 真正开始捕获
+        const doneTabId = (sender.tab && sender.tab.id) || message.tabId;
+        console.log('[YR-bg] 收到 YR_COUNTDOWN_DONE → tab=' + doneTabId);
+        if (countdown.active && countdown.tabId === doneTabId) finishCountdown(false);
+        break;
+      }
+
+      case 'YR_COUNTDOWN_CANCEL': {
+        // 页面内取消（Esc / 点「取消」）：只在该标签页确实处于倒计时时才复位
+        const cancelTabId = (sender.tab && sender.tab.id) || message.tabId;
+        if (countdown.active && countdown.tabId === cancelTabId) {
+          cancelCountdown('已取消本次录制（倒计时未结束，未开始捕获）。');
+        }
+        break;
       }
 
       case 'YR_HOTKEY': {
@@ -586,13 +817,20 @@
               respondHotkey({ ok: true, action: 'stop' });
               return;
             }
+            if (phase === 'countdown') {
+              // 倒计时中再按一次 = 放弃这次录制（等同于点「取消」）
+              console.log('[YR-bg] 快捷键：倒计时中 → 取消');
+              cancelCountdown('已取消本次录制（倒计时未结束，未开始捕获）。');
+              respondHotkey({ ok: true, action: 'cancel' });
+              return;
+            }
             if (phase !== 'idle' && phase !== 'error') {
               // 正在准备 / 组装 / 导出：拒绝本次触发，避免打断不可逆流程
               respondHotkey({ ok: false, code: 'busy', message: '上一次操作尚未结束，请稍候。' });
               return;
             }
             console.log('[YR-bg] 快捷键：空闲 → 开始录制（tab=' + hotkeyTabId + '）');
-            beginRecording(hotkeyTabId, respondHotkey);
+            requestStart(hotkeyTabId, respondHotkey);
           });
         return true; // 异步回执
       }
@@ -600,6 +838,7 @@
       case 'YR_STOP': {
         // popup 请求停止：广播给离屏，由其组装并导出
         console.log('[YR-bg] 收到 YR_STOP');
+        cancelCountdown(''); // 仍在倒计时：视为放弃本次录制
         chrome.runtime.sendMessage({ type: 'REC_STOP' }).catch(() => {});
         try {
           sendResponse({ ok: true });
@@ -612,6 +851,7 @@
       case 'YR_RESET': {
         // popup 触发强制复位：解除残留会话占用
         console.log('[YR-bg] 收到 YR_RESET');
+        cancelCountdown(''); // 残留倒计时一并清掉
         flushOffscreenReset();
         setRectReport(false);
         setPhase('idle', { error: null, notice: '' });
@@ -636,6 +876,8 @@
               error: yrState.error,
               notice: yrState.notice,
               tabId: activeTabId,
+              countdownSec: yrState.countdownSec || 0,
+              countdownEndsAt: yrState.countdownEndsAt || 0,
             },
           }))
           .catch(() => ({ ok: false }))
@@ -653,6 +895,10 @@
       case 'REC_STOP':
       case 'PAGE_LEAVING':
       case 'PAGE_HIDDEN': {
+        // 倒计时途中页面跳走 / 关闭：直接取消，避免兜底定时器对已失效页面发起录制
+        if (message.type === 'PAGE_LEAVING' && countdown.active && countdown.tabId === tabId) {
+          cancelCountdown('');
+        }
         // 心跳包同样用于同步 activeTabId（应对 SW 重启后丢失内存变量的场景）
         if (tabId) {
           activeTabId = tabId;
@@ -797,6 +1043,22 @@
     });
   } catch (err) {
     /* 通知 API 不可用（极少数平台）：指示降级为徽标 / PiP / 红框 */
+  }
+
+  // 倒计时期间标签页被关闭：立即取消（兜底定时器不必再等）
+  try {
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      if (!countdown.active || countdown.tabId !== tabId) return;
+      console.log('[YR-bg] 倒计时中的标签页已关闭 → 取消');
+      clearCountdownTimer();
+      countdown.active = false;
+      countdown.tabId = null;
+      countdown.endsAt = 0;
+      countdown.token += 1;
+      setPhase('idle', { error: null, notice: '' });
+    });
+  } catch (err) {
+    /* tabs 事件不可用：兜底定时器仍能收尾 */
   }
 
   // 读取 / 跟随「系统通知」开关（storage.sync yrIndNotif，默认开）
