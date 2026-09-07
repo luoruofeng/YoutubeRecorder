@@ -13,7 +13,10 @@ YouTube Recorder 扩展静态自检（任务 20 的自动化部分）。
   5. 全部 JS 通过 node --check 语法校验。
   6. 架构边界：content script 中不得出现 tabCapture/downloads/offscreen API
      （它们只允许出现在 background / offscreen）；capture 调用必须位于 offscreen。
-  7. content UI 类名 / 注入样式选择器统一携带 yr-recorder- 前缀（抽查）。
+  7. 页面注入边界：tabCapture 捕获的是整个标签页的合成画面，控件必须位于扩展图标
+     弹窗（popup）；content.js 只允许上报数据，不得创建可见 DOM；唯一允许在页面里
+     创建 DOM 的是 content/guard.js —— 录制期交互锁定遮罩，且必须按播放器画面矩形
+     挖洞（不覆盖被录画面）、仅在录制会话期间存在、结束即移除。
 """
 import json
 import os
@@ -70,7 +73,26 @@ if cs:
         str(matches),
     )
     js = cs.get("js", [])
-    check(js == ["content/ui.js", "content/content.js"], "注入顺序：ui.js → content.js", str(js))
+    # 页面内脚本顺序：
+    # shared/hotkey.js（快捷键定义，弹窗共用）→ shared/indicator.js（全屏录制状态
+    # 指示三开关，阶段十）→ content/guard.js（录制期锁定遮罩 + 全屏黑边红框）→
+    # content/pip.js（Document PiP 全屏置顶状态窗，阶段十）→ content/selector.js
+    # （框选录制选择器，仅用户点击「框选录制」时启用）→ content/content.js（数据上报，
+    # 自身零 DOM）→ content/hotkey.js（页面级快捷键监听）
+    check(
+        js
+        == [
+            "shared/hotkey.js",
+            "shared/indicator.js",
+            "content/guard.js",
+            "content/pip.js",
+            "content/selector.js",
+            "content/content.js",
+            "content/hotkey.js",
+        ],
+        "注入顺序：hotkey → indicator → guard → pip → selector → content → content/hotkey",
+        str(js),
+    )
     check(cs.get("run_at") in ("document_idle", "document_start", "document_end"), "run_at 合理", str(cs.get("run_at")))
 
 print("== 3. 最小权限集 ==")
@@ -103,11 +125,28 @@ for jf in sorted(js_files):
     check(res.returncode == 0, "语法 OK: " + os.path.relpath(jf, SRC), (res.stderr or "").strip()[:200])
 
 print("== 6. 架构边界（API 所在上下文） ==")
+def strip_comments(src):
+    """去掉块注释与行注释，避免注释中的 API 名称干扰架构边界检查。"""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)//.*$", "", src)
+    return src
+
+
 def read(rel):
-    with open(os.path.join(SRC, rel), encoding="utf-8") as f:
+    p = os.path.join(SRC, rel)
+    if not os.path.isfile(p):
+        return ""  # 文件可安全删除（如已废弃的页面 UI 层）
+    with open(p, encoding="utf-8") as f:
         return f.read()
 
-content_src = read("content/content.js") + read("content/ui.js")
+
+content_src = strip_comments(
+    read("content/content.js")
+    + read("content/ui.js")
+    + read("content/guard.js")
+    + read("content/pip.js")
+    + read("shared/indicator.js")
+)
 check("chrome.tabCapture" not in content_src, "content script 不直接调用 tabCapture")
 check("chrome.downloads" not in content_src, "content script 不直接调用 downloads")
 check("chrome.offscreen" not in content_src, "content script 不直接调用 offscreen")
@@ -118,20 +157,67 @@ check("chromeMediaSourceId" in offscreen_src, "offscreen 使用 streamId 消费�
 check("chrome.downloads.download" in offscreen_src, "downloads.download 位于 offscreen")
 check("chrome.offscreen.createDocument" in bg, "offscreen 生命周期由 background 管理")
 
-print("== 7. content UI 前缀抽查 ==")
-text = read("content/ui.js")
-cls_assigns = re.findall(r"(?:className|el\('[^']*',\s*)\s*'([^']*)'", text)
-bad_cls = [c for c in cls_assigns if c and not c.startswith("yr-recorder-") and c not in ("yr-recorder-state-text",)]
-# 组合类中的每个 token 都须带前缀
-def tokens_ok(c):
-    return all(t.startswith("yr-recorder-") for t in c.split())
-bad_cls = [c for c in cls_assigns if c and not tokens_ok(c)]
-check(not bad_cls, "UI 元素类名均为 yr-recorder- 前缀", "bad=" + str(bad_cls[:3]))
-style_block = text[text.find("CSS_TEXT") :]
-# 注入 CSS 中不允许出现裸标签选择器（如 "button {" / "body {"/ "div {")
-for sel in re.findall(r"(?m)^([A-Za-z][A-Za-z0-9]*(?:\s*\{))", style_block):
-    bad = re.findall(r"^(?:html|body|div|span|button|video|canvas)\s*\{", sel)
-check(not re.search(r"(?m)^(html|body|div|span|button|video|canvas)\s*\{", style_block), "注入 CSS 无裸标签选择器")
+print("== 7. 页面注入边界（控件不进入录制画面 / 遮罩不得覆盖画面） ==")
+content_code = strip_comments(read("content/content.js"))
+check(
+    not re.search(r"document\.(body|documentElement|head)\.appendChild", content_code),
+    "content.js 不向页面追加任何 DOM 节点",
+)
+check("createElement" not in content_code, "content.js 不创建元素（保持零注入）")
+check("yr-recorder-" not in content_code, "content.js 不含 yr-recorder- UI 代码")
+popup_html = read("popup.html")
+check("yr-primary" in popup_html, "开始 / 停止控件位于扩展图标弹窗")
+
+guard_code = strip_comments(read("content/guard.js"))
+check("window.YRGuard" in guard_code, "guard.js 暴露 YRGuard（生命周期由 content.js 控制）")
+check("function enable" in guard_code and "function disable" in guard_code, "遮罩可随会话启用 / 移除")
+check(
+    "hole" in guard_code and "HOLE_MARGIN_BASE" in guard_code,
+    "遮罩按播放器画面矩形挖洞（不覆盖被录画面）",
+)
+check(
+    "pointer-events:none" in guard_code,
+    "遮罩根节点 pointer-events:none（洞内留空，不改变画面像素）",
+)
+check("removeEventListener" in guard_code, "结束时解绑全部页面监听")
+check(
+    "preventDefault" in guard_code,
+    "拦截滚动 / 快捷键等页面交互",
+)
+
+print("== 8. 录制快捷键（页面级，配置在扩展弹窗） ==")
+hotkey_code = strip_comments(read("content/hotkey.js"))
+shared_hotkey = strip_comments(read("shared/hotkey.js"))
+check("createElement" not in hotkey_code, "content/hotkey.js 不创建元素（保持零注入）")
+check("window.YRHotkey" in shared_hotkey, "shared/hotkey.js 暴露 YRHotkey（popup 与 content 共用）")
+check(
+    "chrome.tabCapture" not in hotkey_code + shared_hotkey,
+    "快捷键模块不直接调用 tabCapture（仍由 background 申请 streamId）",
+)
+settings_code = strip_comments(read("popup/settings.js"))
+check("window.YRSettings" in settings_code, "popup/settings.js 暴露设置模态框接口")
+check("yr-primary" in read("popup.html") and "yr-settings" in read("popup.html"), "弹窗含录制按钮与设置入口")
+bg_code = read("background.js")
+check("YR_HOTKEY" in bg_code, "background 处理页面快捷键（按状态切换开始 / 停止）")
+
+print("== 9. 全屏录制状态指示（阶段十） ==")
+pip_code = strip_comments(read("content/pip.js"))
+ind_code = strip_comments(read("shared/indicator.js"))
+check("window.YRPip" in pip_code, "content/pip.js 暴露 YRPip（全屏置顶状态窗）")
+check("openIfFullscreen" in pip_code, "状态窗由页面快捷键（用户激活）驱动打开")
+check("window.YRIndicator" in ind_code, "shared/indicator.js 暴露 YRIndicator（三个指示开关）")
+check(
+    "chrome.notifications" in bg_code,
+    "background 使用系统通知（录制常驻 / 结果回执）",
+)
+check(
+    any(("notifications" in p) for p in manifest.get("permissions", [])),
+    "manifest 声明 notifications 权限",
+)
+check(
+    "YR_PIP_STATE" in bg_code and "YR_PIP_STATE" in pip_code,
+    "YR_PIP_STATE 广播链路（background → content 状态窗）",
+)
 
 print()
 if errors:

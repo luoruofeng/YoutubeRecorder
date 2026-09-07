@@ -1,39 +1,74 @@
-# YoutubeRecorder
+# YouTube Recorder
 
-Chrome Manifest V3 浏览器扩展：在 YouTube 播放页**手动点击**触发录制，捕获当前标签页完整画面与页面音频，在浏览器内用 Canvas 逐帧裁剪出播放器区域，最终输出**带音频的 `video/webm`** 并下载到本地。
+<div align="center">
+  <b>简体中文</b> ·
+  <a href="README.en.md">English</a> ·
+  <a href="README.ja.md">日本語</a> ·
+  <a href="README.fr.md">Français</a> ·
+  <a href="README.de.md">Deutsch</a> ·
+  <a href="README.es.md">Español</a> ·
+  <a href="README.pt.md">Português</a> ·
+  <a href="README.ru.md">Русский</a> ·
+  <a href="README.ko.md">한국어</a> ·
+  <a href="README.it.md">Italiano</a>
+</div>
 
-- 零第三方依赖、无 npm、无 ffmpeg / 无任何转码。
-- 全程原生 JavaScript（TS 仅以 `src/types/*.d.ts` 做类型标注）。
-- 录制只由用户点击「开始录制」触发，绝无后台静默捕获。
+Chrome Manifest V3 浏览器扩展：在 YouTube 播放页**手动点击**触发录制，捕获当前标签页的完整画面与页面音频，在浏览器内用 Canvas 逐帧裁剪出**播放器区域（或你框选的任意区域）**，最终输出**带音频的视频文件**并下载到本地——原生优先输出 **MP4（H.264/AAC）**，浏览器或系统不支持时自动回退为 **WebM**。
+
+## 特性
+
+- **零第三方依赖**：无 npm、无构建步骤、无 ffmpeg、无任何二次转码（MP4 由浏览器 `MediaRecorder` 原生录制，而非录后转换）。
+- **两种录制模式**
+  - **整页录制**：自动定位播放器「真实画面矩形」（结合 `object-fit` / `object-position` 计算，剔除黑边、剧场模式留白与播放器外壳），只录画面本身。
+  - **框选录制**：在页面上拖拽框选任意矩形，只录该区域。
+- **画面绝对干净**：录制控件全部位于扩展图标弹窗（popup 是独立扩展页面，不属于被捕获标签页的渲染内容），成片中不会出现任何扩展 UI。
+- **页面快捷键**：默认单键 `R` → 空闲时开始录制、录制中停止并保存；可在弹窗「设置」里自由改成 `Ctrl` / `Alt` / `Shift` / `Command` 组合键。快捷键仅在 YouTube 页面生效，不误伤其它标签页，也不与浏览器全局快捷键冲突。
+- **录制期自动锁定页面**：半透明遮罩按画面矩形「挖洞」盖住画面以外区域，屏蔽滚动、点击与破坏性快捷键；**播放 / 暂停、进度、音量、字幕、倍速等纯播放控制依然可用**。
+- **稳定裁剪**：固定 30fps 输出；画布尺寸首帧锁定；裁剪矩形需连续稳定 3 帧才启动录制，避免广告 / 剧场切换等瞬态大矩形被锁进成片。
+- **音频不丢**：捕获到的音轨经 `AudioContext` 回放，避免原标签页在录制期间被静音导致成片无声。
+- **全屏也能看到「正在录制」**：全屏播放时画面铺满、遮罩提示无处安放，此时用常驻系统通知与 Document PiP 置顶状态窗（REC + 计时 + 停止按钮）显示状态，画面有黑边时还会在黑边内描细红框 —— 所有指示都在被捕获画面之外，**不会进入视频**；可在弹窗「设置 → 全屏录制状态提示」逐项开关。
+- **异常兜底齐全**：DRM 黑屏检测、切标签页 / 页面跳转自动停止并导出、心跳中断主动拉取自愈、下载失败自动重试、残留会话「强制复位并重新开始」。
+- **录制只由用户点击触发**，绝无后台静默捕获。
 
 ## 目录结构
 
 ```
-DESIGN.md            技术设计文档（底层能力清单 / 架构 / 消息协议 / 边界处理 / 数据流）
-TODO.md              开发任务清单（逐项验收打勾）
+DESIGN.md                    技术设计文档（能力清单 / 架构 / 消息协议 / 边界处理 / 数据流）
+TODO.md                      开发任务清单（逐项验收打勾）
 src/
-├── manifest.json     MV3 清单（tabCapture + downloads + activeTab + offscreen）
-├── background.js     Service Worker：offscreen 生命周期与消息路由
-├── offscreen.html   离屏文档宿主
-├── offscreen.js     录制核心：tabCapture → 隐藏 video → canvas 裁剪 → MediaRecorder → 下载
+├── manifest.json            MV3 清单（tabCapture + downloads + activeTab + offscreen + storage + notifications）
+├── background.js            Service Worker：offscreen 生命周期、消息路由、全局状态与图标徽标、系统通知、下载代理
+├── offscreen.html           离屏文档宿主
+├── offscreen.js             录制核心：getUserMedia 消费 tab 流 → 隐藏 video → canvas 裁剪 → MediaRecorder → Blob
+├── shared/
+│   ├── hotkey.js            「开始 / 停止录制」快捷键公共定义（popup 设置 / 弹窗提示 / content 监听共用）
+│   └── indicator.js         全屏录制状态指示三开关（pip / notif / border）的读写（popup / content / guard 共用）
 ├── content/
-│   ├── ui.js        content script UI 组件（yr-recorder- 前缀注入层：面板/模态框/加载框/toast）
-│   └── content.js   content script 主逻辑（面板交互 + 播放器定位 + 状态机）
-├── popup.html       插件图标入口（打开页面内录制面板）
+│   ├── guard.js             录制期页面锁定遮罩（按画面矩形挖洞）+ 全屏黑边红框
+│   ├── pip.js               全屏 Document PiP 置顶状态窗（REC + 计时 + 停止按钮）
+│   ├── selector.js          框选录制选择器（点击「框选录制」后按需启用）
+│   ├── content.js           无界面脚本：播放器矩形心跳上报 + 页面隐藏 / 跳转通知 + 开关遮罩
+│   └── hotkey.js            页面级「开始 / 停止录制」快捷键监听
+├── popup.html               扩展图标弹窗：录制控制台（开始 / 框选 / 停止 / 状态 / 计时 / 提示 / 设置）
 ├── popup.js
-├── icons/           16/32/48/128 图标
-└── types/           chrome.* API 类型声明（仅类型标注）
-scripts/verify_extension.py   扩展静态自检脚本
+├── popup/
+│   └── settings.js          设置模态框（快捷键、全屏录制状态提示开关）
+├── assets/                  静态资源
+├── icons/                   16/32/48/128 图标
+└── types/                   chrome.* API 类型声明（仅类型标注）
+scripts/verify_extension.py  扩展静态自检脚本
 ```
 
-## 架构简析（为什么需要 offscreen）
+## 架构简析（为什么需要 offscreen document）
 
-`chrome.tabCapture` 不能在 content script 中调用；而裁剪所需的 `video/canvas/MediaRecorder` 又必须运行在有 DOM 的窗口上下文。因此录制核心放在 **offscreen document** 中，并由 background 先申请 `streamId` 再交给离屏页消费：
+`chrome.tabCapture` 不能在 content script 中调用；而裁剪所需的 `video` / `canvas` / `MediaRecorder` 又必须运行在有 DOM 的窗口上下文；popup 会失焦关闭、Service Worker 没有 DOM。因此录制核心落在 **offscreen document** 上：
 
-1. content script 注入 `yr-recorder-` UI，实时定位 `ytd-player` 并上报播放器矩形（CSS 坐标 × devicePixelRatio）。
-2. background 按需创建离屏文档。
-3. background 调用 `chrome.tabCapture.getMediaStreamId()` 获取当前标签页的 `streamId`。
-4. 离屏内用 `getUserMedia({ chromeMediaSourceId: streamId })` 消费全页流，再完成：隐藏 `video` 播放全页流 → 隐藏 `canvas` 逐帧 `drawImage` 裁剪 → `canvas.captureStream(30)` 视频轨 + 原始 `audioTrack` 合流 → `MediaRecorder` 录 webm → 组装 Blob → `chrome.downloads.download`。
+1. **content script**（自身零注入 UI，只上报数据）每 ~120ms 定位播放器，上报「真实画面矩形」与视口基准（CSS 尺寸 / `devicePixelRatio` / 可视视口偏移）。
+2. **background** 按需创建离屏文档，并在用户手势链路内调用 `chrome.tabCapture.getMediaStreamId()` 取得 `streamId`。
+3. **离屏**用 `getUserMedia({ chromeMediaSourceId: streamId })` 消费全页流（画面 + 页面音频）。
+4. **离屏**内完成：隐藏 `video` 播放全页流 → 隐藏 `canvas` 逐帧 `drawImage` 裁剪 → `canvas.captureStream(30)` 视频轨 + 原始 `audioTrack` 合流 → `MediaRecorder` 录制（`video/mp4` 优先、逐级回退 `video/webm`）→ 组装 Blob。
+   - 坐标换算采用**实测比例**（「捕获帧尺寸 ÷ 视口 CSS 尺寸」，按 contain 模型加居中补边），而非简单 `rect × devicePixelRatio`，从根本上避免高分屏 / 缩放下的画面偏移。
+5. 离屏**无法**直接调用 `chrome.downloads`，通过 `DOWNLOAD_FILE` 消息交给 **background** 代理下载，并由 background 监听 `downloads.onChanged` 回传结果。
 
 详见 `DESIGN.md`。
 
@@ -43,15 +78,51 @@ scripts/verify_extension.py   扩展静态自检脚本
 2. 右上角开启「开发者模式」。
 3. 点「加载已解压的扩展程序」，选择本仓库的 `src/` 目录（无构建步骤，无需编译）。
 
-> 要求：Chrome ≥ 109（`chrome.offscreen` API），推荐最新稳定版。
+> 要求：Chrome ≥ 116（扩展声明的 `minimum_chrome_version`，`chrome.offscreen` 所需）；原生 MP4 输出需 Chrome ≥ 126。推荐最新稳定版。
 
 ## 使用
 
-1. 打开任意 **YouTube 播放页**（公开视频；DRM/会员付费视频画面会黑屏，属浏览器保护限制）。
-2. 点击扩展图标 → popup 中点击「在页面中打开录制面板」→ 页面右上角浮出录制面板。
-3. 点「开始录制」（请保持该标签页可见、播放器完整在视口内）。
-4. 结束后点「停止录制」→ 自动组装并下载 `YouTube-日期-时间.webm`。
-5. 导出完成后页面内自定义组件会自动清理，不污染页面。
+1. 打开任意 **YouTube 播放页**（公开视频；DRM / 会员付费视频画面会黑屏，属浏览器保护限制）。
+2. 点击扩展图标 → 弹窗中点击「**开始录制**」（请保持该标签页可见、播放器完整在视口内）。
+   - 浏览器 / 系统不支持原生 MP4（Chrome < 126 或缺少 H.264/AAC 编码器）时，弹窗底部会说明本次将回退为 WebM。
+   - 录制中图标上会显示红色 `REC` 徽标；关闭弹窗不影响录制，再点图标即可继续操作。
+3. **框选录制**（可选）：点击「**框选录制**」→ 弹窗自动关闭 → 在页面上拖拽框选区域 → 点「开始录制选区」（按 `Esc` 可退出选择器）。
+   - 录制中「停止录制」按钮会**自动排布到选区之外**，绝不会被裁进成片；若选区几乎铺满视口放不下按钮，页面内控件会隐藏，此时请用扩展弹窗或快捷键停止。
+4. 结束时点击「**停止并保存**」→ 自动组装并下载 `YouTube-年月日-时分秒.mp4`（回退环境则为 `.webm`）。
+5. **快捷键**：在 YouTube 播放页按下默认快捷键 `R` 开始录制，录制中再按一次 `R` 停止并保存。
+   - 点击弹窗右上角的「**设置**」可修改快捷键：点击按键框后直接按下新组合键，按 `Esc` 取消修改；改完即时生效，无需刷新页面。
+   - 快捷键仅在 YouTube 页面获得焦点时生效，在搜索框 / 评论框等输入区域不会触发；若与浏览器或 YouTube 播放器快捷键冲突，设置面板会给出提示。
+6. **画面微调**（弹窗底部折叠项）：个别环境（异常缩放组合、多显示器混插）裁剪仍可能有固定偏差，可填「垂直 / 水平」像素值手动平移裁剪框（正数 = 向下 / 向右）。
+7. **录制期间页面会被遮罩锁定**（整页录制模式）：
+   - 画面以外全部盖上半透明黑，点不到任何按钮 / 链接，滚轮与触摸滑动被拦截，页面滚动位置锁定。
+   - **可用**：播放 / 暂停、进度拖动、音量、字幕、倍速等纯播放控制。
+   - **被拦**：滚动翻页键（空格 / PageUp·Down / Home·End / 上下方向键）、全屏 `f`、剧场 `t`、迷你播放器 `i`、静音 `m`、双击画面 —— 这些操作会改变布局或让音轨无声。
+   - 遮罩按画面矩形挖洞，只遮画面以外，因此**不会出现在输出视频里**；画面下方（空间不足时在上方）显示「录制中 · 页面已锁定」。
+   - 浏览器窗口缩放无法被网页禁止：一旦检测到视口尺寸变化，遮罩上会亮出告警并在弹窗提示建议重录（此时画面裁剪可能偏移）。
+8. 停止后遮罩自动移除，页面恢复原状，无残留节点与监听。
+
+### 输出格式说明
+
+| 环境 | 输出格式 |
+| --- | --- |
+| Chrome ≥ 126 且系统提供 H.264/AAC 编码器（如新版 Windows / macOS Chrome） | **MP4**（H.264 + AAC，`.mp4`） |
+| Chrome < 126 | WebM（`.webm`），弹窗会提示回退原因 |
+| Chrome ≥ 126 但平台缺编码器（部分 Linux 构建等） | WebM（`.webm`），弹窗会提示回退原因 |
+
+> 扩展不做任何二次转码：能输出 MP4 时由浏览器 `MediaRecorder` 原生录制（零等待、画质无损耗）；不能时才回退为 WebM。
+
+### 权限说明
+
+| 权限 | 用途 |
+| --- | --- |
+| `tabCapture` | 受限权限，仅用于用户点击后捕获当前标签页画面与音频 |
+| `downloads` | 把录制结果保存到本地下载目录 |
+| `activeTab` | 用户点击扩展图标时授予当前标签页临时访问权 |
+| `offscreen` | 创建承载捕获 / 裁剪 / 录制的离屏文档 |
+| `storage` | `session` 级保存录制状态与启动意图；`sync` 级保存快捷键、画面微调与全屏录制状态提示开关 |
+| `notifications` | 全屏录制状态指示：录制中常驻「正在录制」通知（可点按钮停止）+ 保存成功 / 失败回执（可在设置关闭） |
+
+无 `host_permissions`、无网络请求、无任何用户数据采集。
 
 ## 静态自检
 
@@ -59,19 +130,30 @@ scripts/verify_extension.py   扩展静态自检脚本
 python3 scripts/verify_extension.py
 ```
 
-覆盖：manifest/MV3/必需文件、YouTube 域名限定、最小权限、零第三方依赖、JS 语法、API 上下文边界（content 不直接调用 tabCapture/downloads/offscreen）、UI 前缀与样式隔离抽查。
+覆盖：manifest / MV3 / 必需文件、YouTube 域名限定与注入顺序、最小权限、零第三方依赖、全部 JS 语法（`node --check`）、API 上下文边界（content 不直接调用 `tabCapture` / `downloads` / `offscreen`）、页面注入边界（控件必须位于扩展弹窗；唯一允许建 DOM 的 `content/guard.js` 必须按画面矩形挖洞、洞内留空、可随会话移除）、快捷键模块边界。
 
-## 手动验收清单（对应 TODO 任务 20）
+## 手动验收清单（对应 `TODO.md` 任务 20）
 
 按上述「加载 + 使用」操作后逐项验收：
 
-- [ ] 20.1 面板正常弹出，样式与 YouTube 页面无冲突；在 YouTube 明暗主题下分别验证配色正常（暗色下为深底浅字）。
-- [ ] 20.2 点「开始录制」→ 捕获成功（状态「正在录制」红色）→ 停止 → 浏览器下载 webm 文件。
+- [ ] 20.1 扩展图标弹窗正常打开：状态 / 计时 / 按钮随录制阶段正确变化；录制中图标显示红色 `REC` 徽标。
+- [ ] 20.2 点「开始录制」→ 捕获成功（状态「正在录制」+ 计时走动）→ 点「停止并保存」→ 浏览器下载 mp4 文件（不支持原生 MP4 的环境弹窗会提示并以 webm 下载）。
 - [ ] 20.3 用系统播放器 / Chrome 打开输出文件：画面为播放器区域裁剪、带音频、可正常播放。
 - [ ] 20.4 高清屏（DPR ≠ 1，如 Retina）下画面不偏移不错位。
-- [ ] 20.5 录制中切换标签页：出现警告 toast；切回页面录制继续或自动停止导出，无异常。
-- [ ] 20.6 录制中全屏切换 / 浏览器缩放：画面裁剪区域跟随正确。
-- [ ] 20.7 错误场景提示正确：非播放页点开始（模态框）、DRM 视频（约 2.6s 后黑屏检测模态框）、捕获被拒等。
-- [ ] 20.8 录制结束（含异常）后：页面无 `yr-recorder-` 残留节点、地址栏无录制红点、无持续报错。
+- [ ] 20.5 录制中切换标签页：弹窗提示捕获可能中断；切回页面录制继续或自动停止导出，无异常。
+- [ ] 20.6 录制中切换全屏 / 浏览器缩放：画面裁剪区域跟随正确。
+- [ ] 20.7 错误场景提示正确：非播放页（开始按钮不可用）、DRM 视频（约 2.6s 后在弹窗提示）、捕获被拒等。
+- [ ] 20.8 录制结束（含异常）后：地址栏无录制红点、页面无扩展残留节点、无持续报错。
+- [ ] 20.9 Chrome < 126 或平台缺 H.264/AAC 编码器时：弹窗提示「当前环境不支持原生 MP4，将输出 WebM」，仍可正常录制下载。
+- [ ] 20.10 输出视频中不含任何扩展控件（无按钮 / 模态框 / 提示浮层）。
+- [ ] 20.11 输出视频中不含锁定遮罩（画面边缘无黑边、无提示文案）。
+- [ ] 20.12 录制中页面被遮罩锁定：点不到按钮 / 链接，滚轮与快捷键无效，页面不滚动；但播放 / 暂停、进度、音量等播放控制可用。
+- [ ] 20.13 录制中缩放窗口：遮罩告警 + 弹窗提示，遮罩重新挖洞仍不压画面。
+- [ ] 20.14 停止保存后遮罩消失、页面恢复可交互，无 `yr-guard-` 残留节点。
+- [ ] 20.15 框选录制：拖拽框选 →「开始录制选区」→ 成片仅含选区内容，且成片中不含「开始 / 停止」等页面内按钮。
+- [ ] 20.16 全屏 + 快捷键开始录制：Document PiP 置顶小窗出现并计时，可点小窗「停止并保存」；成片中不含小窗内容。
+- [ ] 20.17 有黑边的片源（如 21:9 / 竖屏）全屏录制：黑边内出现细红框，成片画面不含红框；铺满屏片源自动无红框。
+- [ ] 20.18 录制中系统通知常驻，可点通知按钮停止；保存完成后出现一次性结果通知；结束后通知与置顶小窗自动消失。
+- [ ] 20.19 在设置里逐一关闭「全屏录制状态提示」三项后：无 PiP / 通知 / 红框，其余录制功能不受影响。
 
 完成全部验收后，将 `TODO.md` 任务 20 各子项打勾即可。

@@ -3,13 +3,16 @@
  *
  * 职责（见 DESIGN.md 2.2）：
  * - 创建 / 关闭 offscreen document（录制核心宿主）。
- * - 消息路由：popup 的 SHOW_PANEL 定向转发给录制标签页的 content script。
+ * - 承接 popup（扩展图标弹窗）的开始 / 停止 / 复位指令。
+ * - 维护全局录制状态（含 storage.session 持久化）与 chrome.action 徽标，
+ *   供随时开关的 popup 回查 —— 页面内不再注入任何 UI，画面中不会出现扩展控件。
+ * - 转发 content 的播放器矩形心跳给离屏，转发离屏广播（REC_STATE 等）的状态到本地。
  * - 监听 REC_STATE idle（全链路复位）→ 回收 offscreen 资源。
  *
  * 说明：录制媒体逻辑放在 offscreen.js，但 tabCapture 的正确入口放在本文件。
  * MV3 中稳定做法是：service worker 在用户手势链路内调用
  * chrome.tabCapture.getMediaStreamId()，再把 streamId 交给 offscreen document
- * 通过 getUserMedia 消费。REC_START 由 content 以 REC_START_REQUEST 请求发起，
+ * 通过 getUserMedia 消费。REC_START 由 popup 以 YR_START 请求发起，
  * 本文件确保离屏存在并转发带 streamId 的 REC_START（带回执）；REC_STOP /
  * PLAYER_RECT 等仍为广播消息由 offscreen 直接消费；REC_STATE idle 触发离屏回收。
  */
@@ -30,8 +33,223 @@
    */
   const pendingStartResponders = [];
 
+  /** 启动请求重发节奏：离屏脚本尚未注册监听时消息会丢失，重发保证至少一次生效 */
+  const START_FORWARD_INTERVAL_MS = 1500;
+  const START_FORWARD_MAX = 6;
+
   /** 当前录制关联的标签页 ID（用于路由离屏广播给 content script） */
   let activeTabId = null;
+
+  // ===================== 全局状态（popup 查询 + 图标徽标） =====================
+  //
+  // 录制控件已全部迁移到扩展图标弹窗（页面内不再注入任何 DOM，保证画面干净），
+  // 而弹窗会因失焦关闭，故状态由本文件统一维护：
+  // · 内存态供即时查询；· storage.session 持久化，SW 重启后弹窗仍能看到真实状态；
+  // · chrome.action 徽标提供「无需打开弹窗」的录制状态提示。
+  const STATE_KEY = 'yrState';
+  const TAB_KEY = 'yrActiveTabId';
+
+  /** 最近一次已知状态 */
+  let yrState = {
+    phase: 'idle', // idle | capturing | recording | stopping | exported | error
+    startedAt: 0, // 进入 recording 的时刻（弹窗据此计时）
+    durationMs: 0, // 最近一次录制时长（结束后保留展示）
+    error: null, // { title, message }
+    notice: '', // 最近一条提示文案（toast / 模态框）
+    updatedAt: 0,
+  };
+
+  /** 图标徽标：不用打开弹窗也能看到当前状态 */
+  const BADGE_BY_PHASE = {
+    idle: { text: '', color: '#1a73e8' },
+    capturing: { text: '···', color: '#8a8a8a' },
+    recording: { text: 'REC', color: '#e62117' },
+    stopping: { text: '···', color: '#8a8a8a' },
+    exported: { text: 'OK', color: '#188038' },
+    error: { text: '!', color: '#e62117' },
+  };
+
+  // ===================== 录制状态指示（系统通知） =====================
+  //
+  // 全屏（HTML fullscreen）播放时页面内没有任何可见标识（见 DESIGN.md 阶段十），
+  // 系统通知浮在全屏之上、不属于被捕获标签页 → 不会入画。录制中保持一条常驻通知
+  // 作为「正在录制」的跨全屏指示，并提供一个「停止并保存」按钮兜底停止入口；
+  // 保存成功 / 失败再发一条一次性通知回执。开关为 storage.sync 的 yrIndNotif（默认开）。
+  const NOTIF_REC_ID = 'yr-recording';
+  const NOTIF_RESULT_ID = 'yr-result';
+  /** 系统通知开关缓存（默认开；启动与 storage.onChanged 时刷新） */
+  let notifOn = true;
+
+  function notifIcon() {
+    return chrome.runtime.getURL('icons/icon128.png');
+  }
+
+  function refreshNotifPref() {
+    try {
+      chrome.storage.sync.get('yrIndNotif', (data) => {
+        if (data && typeof data.yrIndNotif === 'boolean') notifOn = data.yrIndNotif;
+      });
+    } catch (err) {
+      /* storage 不可用：维持默认开启 */
+    }
+  }
+
+  function createNotif(id, options) {
+    if (!notifOn) return;
+    try {
+      if (!options.iconUrl) options.iconUrl = notifIcon();
+      chrome.notifications.create(id, options, () => void chrome.runtime.lastError);
+    } catch (err) {
+      /* 通知不可用不影响主流程 */
+    }
+  }
+
+  function clearNotif(id) {
+    try {
+      chrome.notifications.clear(id, () => void chrome.runtime.lastError);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /** 录制中常驻通知（全屏场景的「正在录制」指示） */
+  function showRecordingNotif() {
+    createNotif(NOTIF_REC_ID, {
+      type: 'basic',
+      title: '正在录制 YouTube 视频',
+      message: '全屏观看时本通知保持可见；完成后视频自动保存到下载目录。',
+      contextMessage: 'YouTube Recorder',
+      requireInteraction: true,
+      priority: 1,
+      buttons: [{ title: '停止并保存' }],
+    });
+  }
+
+  /** 保存完成 / 失败的一次性结果通知 */
+  function showResultNotif(ok, message) {
+    createNotif(NOTIF_RESULT_ID, {
+      type: 'basic',
+      title: ok ? '录制完成 · 视频已保存' : '录制完成 · 保存失败',
+      message: message || (ok ? '视频已保存到下载目录。' : '未能保存文件，请检查浏览器下载设置。'),
+      contextMessage: 'YouTube Recorder',
+      requireInteraction: false,
+    });
+  }
+
+  /** 启动时的状态水合（SW 可能已被回收重建，内存变量会丢失） */
+  const hydration = (async () => {
+    try {
+      if (!chrome.storage || !chrome.storage.session) return;
+      const data = await chrome.storage.session.get([STATE_KEY, TAB_KEY]);
+      if (data && data[STATE_KEY]) yrState = Object.assign(yrState, data[STATE_KEY]);
+      if (data && typeof data[TAB_KEY] === 'number') activeTabId = data[TAB_KEY];
+    } catch (err) {
+      /* 读取失败：保持内存默认值 */
+    }
+  })();
+
+  // SW 重启后若仍在录制：恢复常驻通知（用户在全屏时依然能看到录制指示）
+  hydration
+    .catch(() => {})
+    .then(() => {
+      if (yrState.phase === 'recording') showRecordingNotif();
+    });
+
+  function persistState() {
+    yrState.updatedAt = Date.now();
+    if (!chrome.storage || !chrome.storage.session) return;
+    chrome.storage.session.set({ [STATE_KEY]: yrState, [TAB_KEY]: activeTabId }).catch(() => {});
+  }
+
+  function updateBadge(phase) {
+    try {
+      const b = BADGE_BY_PHASE[phase] || BADGE_BY_PHASE.idle;
+      chrome.action.setBadgeText({ text: b.text });
+      chrome.action.setBadgeBackgroundColor({ color: b.color });
+    } catch (err) {
+      /* 徽标不可用不影响主流程 */
+    }
+  }
+
+  /**
+   * 统一状态变更入口：维护录制时长、图标徽标、系统通知（常驻「正在录制」）
+   * 与持久化，并把最新 phase 广播给录制标签页的 content（全屏 PiP 状态窗据此刷新）。
+   */
+  function setPhase(phase, extra) {
+    const prev = yrState.phase;
+    if (prev === 'recording' && phase !== 'recording') {
+      yrState.durationMs = yrState.startedAt ? Date.now() - yrState.startedAt : 0;
+    }
+    if (phase === 'recording' && prev !== 'recording') {
+      yrState.startedAt = Date.now();
+      showRecordingNotif();
+    } else if (prev === 'recording' && phase !== 'recording') {
+      clearNotif(NOTIF_REC_ID);
+    }
+    if (phase === 'idle' || phase === 'error') yrState.startedAt = 0;
+    yrState.phase = phase;
+    if (extra) Object.assign(yrState, extra);
+    updateBadge(phase);
+    persistState();
+    syncPipStateToTab();
+  }
+
+  /** 通知 content 开启 / 关闭播放器矩形心跳上报 */
+  function setRectReport(on) {
+    if (typeof activeTabId !== 'number') return;
+    chrome.tabs.sendMessage(activeTabId, { type: on ? 'YR_RECT_ON' : 'YR_RECT_OFF' }).catch(() => {});
+  }
+
+  /**
+   * 把最新录制 phase 广播给录制标签页的 content：
+   * 全屏 PiP 状态窗（content/pip.js）据此显示「正在启动 / 录制计时 / 正在保存 / 结束」。
+   */
+  function syncPipStateToTab() {
+    if (typeof activeTabId !== 'number') return;
+    chrome.tabs
+      .sendMessage(activeTabId, {
+        type: 'YR_PIP_STATE',
+        phase: yrState.phase,
+        startedAt: yrState.startedAt,
+        durationMs: yrState.durationMs,
+      })
+      .catch(() => {});
+  }
+
+  /** 解析目标标签页：popup 显式传入优先，否则取当前窗口激活页 */
+  function resolveTabId(explicit) {
+    if (typeof explicit === 'number') return Promise.resolve(explicit);
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const tab = tabs && tabs[0];
+          if (tab && typeof tab.id === 'number') resolve(tab.id);
+          else reject(new Error('未找到当前标签页，无法开始录制。'));
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  function formatDuration(ms) {
+    const total = Math.max(0, Math.round((ms || 0) / 1000));
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  }
+
+  /** 下载结果：成功提示 / 失败报错（本地监听与离屏失败广播共用同一处理） */
+  function applyDownloadResult(message) {
+    setRectReport(false);
+    if (message && message.ok) {
+      const notice = '视频已保存到下载目录（时长 ' + formatDuration(yrState.durationMs) + '）。';
+      setPhase('idle', { error: null, notice });
+      showResultNotif(true, notice);
+    } else {
+      const detail = (message && message.message) || '未能保存文件，请检查浏览器下载设置。';
+      setPhase('error', { error: { title: '保存失败', message: detail } });
+      showResultNotif(false, detail);
+    }
+  }
 
   // ===================== offscreen 生命周期 =====================
 
@@ -97,7 +315,7 @@
     }
   }
 
-  // ===================== 启动握手（REC_START_REQUEST） =====================
+  // ===================== 启动握手（popup 的 YR_START） =====================
 
   /** 读取 storage.session 中的启动意图（含 streamId） */
   function getPendingStart() {
@@ -128,25 +346,69 @@
   }
 
   /**
-   * REC_START_REQUEST 主流程：
+   * YR_START 主流程：
    * 1. 先生成并持久化当前标签页的 streamId —— 即使消息在离屏初始化阶段丢失，
    *    也能在 OFFSCREEN_READY 队列补发时复用同一个 streamId；
    * 2. 确保离屏文档存在（无则创建）；
    * 3. 立即向离屏转发 REC_START 并等待回执（离屏已就绪时的快速通道）。
    * 每次点击开始都会有明确答复（已受理 / 占用 / 离屏不可用），不再让 content 空等超时。
    */
-  function startRecording(tabId, respond) {
-    ensurePendingStart(tabId)
+  function startRecording(tabId, respond, streamId) {
+    // 回执只回一次：重发 / 队列补发 / 超时兜底可能同时到达
+    let replied = false;
+    const once = (payload) => {
+      if (replied) return;
+      replied = true;
+      if (payload && !payload.ok) {
+        setPhase('error', {
+          error: { title: '无法开始录制', message: payload.message || '录制启动失败，请刷新页面重试。' },
+        });
+        setRectReport(false);
+      }
+      try {
+        respond(payload);
+      } catch (err) {
+        /* 发起方已离开：忽略 */
+      }
+    };
+
+    const promise = streamId 
+      ? Promise.resolve({ createdAt: Date.now(), streamId, tabId })
+      : ensurePendingStart(tabId);
+
+    promise
       .then((pendingStart) => ensureOffscreen().then(() => pendingStart))
       .then((pendingStart) => {
-        forwardStartToOffscreen(respond, pendingStart);
+        let attempt = 0;
+        const handleReply = (resp) => {
+          if (resp && resp.ok) {
+            once(resp);
+            return;
+          }
+          // busy(preparing)：离屏确实已在准备中（可能由 storage.session 自查自启），
+          // 继续等待 capturing / recording 广播，不打断也不误报「残留会话」
+          if (resp && resp.busy && resp.phase === 'preparing') return;
+          once(resp || { ok: false, code: 'unknown', message: '离屏未确认录制启动' });
+        };
+
+        const timer = setInterval(() => {
+          if (replied) {
+            clearInterval(timer);
+            return;
+          }
+          attempt += 1;
+          if (attempt > START_FORWARD_MAX) {
+            clearInterval(timer);
+            once({ ok: false, code: 'timeout', message: '离屏录制进程长时间无响应，请刷新页面后重试。' });
+            return;
+          }
+          forwardStartToOffscreen(handleReply, pendingStart);
+        }, START_FORWARD_INTERVAL_MS);
+
+        forwardStartToOffscreen(handleReply, pendingStart); // 立即发第一次
       })
       .catch((err) => {
-        try {
-          respond({ ok: false, code: 'offscreen-error', message: String((err && err.message) || err) });
-        } catch (e) {
-          /* 发起方已离开：忽略 */
-        }
+        once({ ok: false, code: 'offscreen-error', message: String((err && err.message) || err) });
       });
   }
 
@@ -241,12 +503,12 @@
     });
   }
 
-  /** REC_RESET_REQUEST：离屏若存在则广播强制复位，解除残留会话造成的启动卡死 */
+  /** YR_RESET：离屏若存在则广播强制复位，解除残留会话造成的启动卡死 */
   async function flushOffscreenReset() {
     try {
       const has = await chrome.offscreen.hasDocument();
       if (!has) {
-        console.log('[YR-bg] REC_RESET_REQUEST：离屏不存在，无需复位');
+        console.log('[YR-bg] 复位请求：离屏不存在，无需复位');
         return; // 离屏不存在则无需复位（下一轮启动请求会自动重建）
       }
       console.log('[YR-bg] 广播 REC_RESET 给离屏');
@@ -254,6 +516,40 @@
     } catch (err) {
       /* 忽略：复位失败不影响主流程 */
     }
+  }
+
+  // ===================== 开始录制（弹窗点击 / 页面快捷键共用） =====================
+
+  /**
+   * 「开始录制」统一入口。
+   * 关键：必须在用户手势链路内立即申请 streamId，避免异步等待导致手势丢失。
+   */
+  function beginRecording(targetTabId, respondStart) {
+    if (!targetTabId) {
+      respondStart({ ok: false, code: 'no-tab', message: '未找到当前标签页，无法开始录制。' });
+      return;
+    }
+
+    chrome.tabCapture.getMediaStreamId({ targetTabId }, (streamId) => {
+      if (chrome.runtime.lastError || !streamId) {
+        const msg = (chrome.runtime.lastError && chrome.runtime.lastError.message) || '获取标签页流失败';
+        console.error('[YR-bg] getMediaStreamId 失败:', msg);
+        setPhase('error', { error: { title: '无法开始录制', message: msg } });
+        respondStart({ ok: false, code: 'stream-id-error', message: msg });
+        return;
+      }
+
+      console.log('[YR-bg] getMediaStreamId 成功, id=' + streamId.slice(0, 8) + '...');
+      activeTabId = targetTabId;
+      setRectReport(true);
+      setPhase('capturing', { error: null, notice: '', durationMs: 0 });
+
+      // 将 streamId 暂存并启动离屏录制
+      const pendingStart = { createdAt: Date.now(), streamId, tabId: targetTabId };
+      setPendingStart(pendingStart).then(() => {
+        startRecording(targetTabId, respondStart, streamId);
+      });
+    });
   }
 
   // ===================== 消息路由 =====================
@@ -264,26 +560,93 @@
     const tabId = sender.tab && sender.tab.id;
 
     switch (message.type) {
-      case 'SHOW_PANEL': {
-        // 其它扩展页面传来：定向转发给目标标签页的 content script
-        const targetTabId = message.tabId;
-        if (typeof targetTabId === 'number' && targetTabId >= 0) {
-          chrome.tabs.sendMessage(targetTabId, { type: 'SHOW_PANEL' }, () => {
-            if (sendResponse) {
-              sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError && chrome.runtime.lastError.message });
+      case 'YR_START': {
+        // popup 发起录制（扩展页无 sender.tab，tabId 由 popup 显式传入）
+        // content script 发起录制（由 sender.tab.id 获取）
+        const respondStart = sendResponse || function () {};
+        const targetTabId = message.tabId || (sender.tab && sender.tab.id);
+
+        console.log('[YR-bg] 收到 YR_START → tab=' + targetTabId);
+        beginRecording(targetTabId, respondStart);
+        return true; // 异步回执
+      }
+
+      case 'YR_HOTKEY': {
+        // 页面快捷键（content/hotkey.js）：按 background 的真实状态在开始 / 停止间切换。
+        // 状态权威在 background —— 弹窗可以随时开关，页面侧不缓存任何状态。
+        const respondHotkey = sendResponse || function () {};
+        const hotkeyTabId = (sender.tab && sender.tab.id) || message.tabId;
+        hydration
+          .catch(() => {})
+          .then(() => {
+            const phase = yrState.phase;
+            if (phase === 'recording') {
+              console.log('[YR-bg] 快捷键：录制中 → 停止并保存');
+              chrome.runtime.sendMessage({ type: 'REC_STOP' }).catch(() => {});
+              respondHotkey({ ok: true, action: 'stop' });
+              return;
             }
+            if (phase !== 'idle' && phase !== 'error') {
+              // 正在准备 / 组装 / 导出：拒绝本次触发，避免打断不可逆流程
+              respondHotkey({ ok: false, code: 'busy', message: '上一次操作尚未结束，请稍候。' });
+              return;
+            }
+            console.log('[YR-bg] 快捷键：空闲 → 开始录制（tab=' + hotkeyTabId + '）');
+            beginRecording(hotkeyTabId, respondHotkey);
           });
-          return true; // 异步 sendResponse
+        return true; // 异步回执
+      }
+
+      case 'YR_STOP': {
+        // popup 请求停止：广播给离屏，由其组装并导出
+        console.log('[YR-bg] 收到 YR_STOP');
+        chrome.runtime.sendMessage({ type: 'REC_STOP' }).catch(() => {});
+        try {
+          sendResponse({ ok: true });
+        } catch (err) {
+          /* ignore */
         }
         break;
       }
 
-      case 'REC_START_REQUEST': {
-        // content 发起录制：确保离屏存活并把 REC_START 转发给离屏（带回执）
-        console.log('[YR-bg] 收到 REC_START_REQUEST from tab=' + tabId);
-        if (tabId) activeTabId = tabId; // 记录当前活动的录制标签页
-        startRecording(tabId, sendResponse);
-        return true; // 异步回执（保持消息通道）
+      case 'YR_RESET': {
+        // popup 触发强制复位：解除残留会话占用
+        console.log('[YR-bg] 收到 YR_RESET');
+        flushOffscreenReset();
+        setRectReport(false);
+        setPhase('idle', { error: null, notice: '' });
+        try {
+          sendResponse({ ok: true });
+        } catch (err) {
+          /* ignore */
+        }
+        break;
+      }
+
+      case 'YR_GET_STATE': {
+        // popup 打开时回查当前状态（SW 可能刚被唤醒，先等状态水合完成）
+        const respondState = sendResponse || function () {};
+        hydration
+          .then(() => ({
+            ok: true,
+            state: {
+              phase: yrState.phase,
+              startedAt: yrState.startedAt,
+              durationMs: yrState.durationMs,
+              error: yrState.error,
+              notice: yrState.notice,
+              tabId: activeTabId,
+            },
+          }))
+          .catch(() => ({ ok: false }))
+          .then((payload) => {
+            try {
+              respondState(payload);
+            } catch (err) {
+              /* 弹窗已关闭：忽略 */
+            }
+          });
+        return true; // 异步回执
       }
 
       case 'PLAYER_RECT':
@@ -299,10 +662,12 @@
         break;
       }
 
-      case 'REC_RESET_REQUEST': {
-        // content 兜底复位：解除残留会话导致的「无法开始」
-        console.log('[YR-bg] 收到 REC_RESET_REQUEST');
-        flushOffscreenReset();
+      case 'PLAYER_RECT_REQUEST': {
+        // 离屏主动拉取播放器矩形：定向转发给录制标签页的 content 立即补报一次
+        // （离屏发出的消息无 sender.tab，须按 activeTabId 转发；content 无法直收离屏广播）
+        if (activeTabId) {
+          chrome.tabs.sendMessage(activeTabId, { type: 'PLAYER_RECT_REQUEST' }).catch(() => {});
+        }
         break;
       }
 
@@ -314,24 +679,45 @@
       }
 
       case 'REC_STATE': {
-        // 转发给 content script（MV3 下 content script 无法直接收到来自离屏的广播）
-        if (activeTabId) chrome.tabs.sendMessage(activeTabId, message).catch(() => {});
+        // 页面内已无 UI，状态不再转发给 content，只维护全局状态 + 徽标供 popup 查询
+        const phase = message.phase;
+        console.log('[YR-bg] REC_STATE phase=' + phase);
+        if (phase === 'error') {
+          const payload = message.payload || {};
+          const title = payload.title || '录制失败';
+          const detail = payload.message || '';
+          setPhase('error', { error: { title, message: detail } });
+          setRectReport(false);
+          showResultNotif(false, detail || title);
+        } else if (phase) {
+          setPhase(phase, phase === 'recording' ? { error: null } : null);
+          // 停止 / 导出 / 复位后不再需要播放器矩形心跳
+          if (phase === 'stopping' || phase === 'exported' || phase === 'idle') setRectReport(false);
+        }
         // 全链路复位（录制完成 / 失败后离屏自清）→ 延迟回收离屏资源
-        console.log('[YR-bg] REC_STATE phase=' + message.phase);
-        if (message.phase === 'idle') {
+        if (phase === 'idle') {
           scheduleCloseOffscreen();
         }
         break;
       }
 
-      case 'UI_ACTION':
-      case 'DOWNLOAD_RESULT':
+      case 'UI_ACTION': {
+        // 离屏提示（无音频 / 标签页切走 / DRM 等）：页面内已无 UI，记入状态供弹窗展示
+        const payload = message.payload || {};
+        const prefix = message.action === 'modal' && payload.title ? payload.title + '：' : '';
+        const text = prefix + (payload.message || '');
+        if (text) setPhase(yrState.phase, { notice: text });
+        break;
+      }
+
+      case 'DOWNLOAD_RESULT': {
+        // 离屏侧（下载触发失败）广播的下载结果
+        applyDownloadResult(message);
+        break;
+      }
+
       case 'YR_LOG': {
-        // 路由转发：离屏 -> background -> content
-        if (activeTabId) chrome.tabs.sendMessage(activeTabId, message).catch(() => {});
-        if (message.type === 'YR_LOG') {
-          console.log('[YR-offscreen]', (message && message.text) || '');
-        }
+        console.log('[YR-offscreen]', (message && message.text) || '');
         break;
       }
 
@@ -372,19 +758,56 @@
       if (current === 'complete') {
         chrome.downloads.onChanged.removeListener(onChanged);
         console.log('[YR-bg] 下载完成:', downloadId);
-        // 通知 content 和 offscreen
+        // 更新全局状态（popup 展示）并通知 offscreen 复位
         const result = { type: 'DOWNLOAD_RESULT', ok: true, downloadId };
-        if (activeTabId) chrome.tabs.sendMessage(activeTabId, result).catch(() => {});
+        applyDownloadResult(result);
         chrome.runtime.sendMessage(result).catch(() => {});
       } else if (current === 'interrupted') {
         chrome.downloads.onChanged.removeListener(onChanged);
         const message = (delta.error && delta.error.current) || 'UNKNOWN';
         console.error('[YR-bg] 下载中断:', downloadId, message);
+        // 更新全局状态（popup 展示）并通知 offscreen 复位
         const result = { type: 'DOWNLOAD_RESULT', ok: false, message, downloadId };
-        if (activeTabId) chrome.tabs.sendMessage(activeTabId, result).catch(() => {});
+        applyDownloadResult(result);
         chrome.runtime.sendMessage(result).catch(() => {});
       }
     };
     chrome.downloads.onChanged.addListener(onChanged);
+  }
+
+  // ===================== 系统通知事件 =====================
+
+  try {
+    chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) => {
+      if (notificationId !== NOTIF_REC_ID || buttonIndex !== 0) return;
+      if (yrState.phase === 'recording') {
+        // 通知按钮 = 停止并保存：全屏观看时无需退出全屏即可停止
+        console.log('[YR-bg] 系统通知按钮：停止并保存');
+        chrome.runtime.sendMessage({ type: 'REC_STOP' }).catch(() => {});
+      } else {
+        clearNotif(NOTIF_REC_ID); // 会话已结束：清理可能残留的常驻通知
+      }
+    });
+
+    chrome.notifications.onClicked.addListener((notificationId) => {
+      // 点击主体：录制中保留（它本身就是全屏时的录制指示）；非录制态点击即清除
+      if (notificationId === NOTIF_REC_ID && yrState.phase !== 'recording') {
+        clearNotif(NOTIF_REC_ID);
+      }
+    });
+  } catch (err) {
+    /* 通知 API 不可用（极少数平台）：指示降级为徽标 / PiP / 红框 */
+  }
+
+  // 读取 / 跟随「系统通知」开关（storage.sync yrIndNotif，默认开）
+  refreshNotifPref();
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync' || !changes.yrIndNotif) return;
+      notifOn = changes.yrIndNotif.newValue !== false;
+      if (!notifOn) clearNotif(NOTIF_REC_ID); // 关闭即清理常驻录制通知
+    });
+  } catch (err) {
+    /* storage 不可用则维持当前配置 */
   }
 })();

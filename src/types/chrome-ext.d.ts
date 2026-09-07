@@ -140,6 +140,36 @@ declare namespace chrome {
     function hasDocument(): Promise<boolean>;
   }
 
+  // ---------- notifications ----------
+  namespace notifications {
+    type TemplateType = 'basic' | 'image' | 'list' | 'progress';
+    type NotificationOptions = {
+      type: TemplateType;
+      iconUrl?: string;
+      title: string;
+      message: string;
+      contextMessage?: string;
+      requireInteraction?: boolean;
+      priority?: number;
+      buttons?: { title: string; iconUrl?: string }[];
+    };
+    function create(
+      notificationId: string,
+      options: NotificationOptions,
+      callback?: (notificationId: string) => void
+    ): void;
+    function clear(notificationId: string, callback?: (wasVisible: boolean) => void): void;
+    const onClicked: {
+      addListener: (listener: (notificationId: string) => void) => void;
+    };
+    const onButtonClicked: {
+      addListener: (listener: (notificationId: string, buttonIndex: number) => void) => void;
+    };
+    const onClosed: {
+      addListener: (listener: (notificationId: string, byUser: boolean) => void) => void;
+    };
+  }
+
   // ---------- i18n ----------
   function i18n(messageName: string): string;
 }

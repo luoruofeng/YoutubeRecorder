@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>YouTube Recorder</title>
   <style>
-    /* popup 为扩展独立页面，无污染页面样式问题，直接内联样式即可 */
+    /* popup 为扩展独立页面（不属于被捕获标签页的渲染内容，绝不会被录进视频），内联样式即可 */
     :root {
       color-scheme: light dark;
     }
@@ -12,48 +12,115 @@
       box-sizing: border-box;
     }
     body {
-      width: 300px;
+      width: 290px;
       margin: 0;
+      padding: 16px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
         'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
       font-size: 14px;
       color: #111111;
       background: #ffffff;
-      padding: 16px;
     }
     @media (prefers-color-scheme: dark) {
       body {
         color: #f1f1f1;
         background: #212121;
       }
-      .yr-popup-desc {
+      .yr-tip {
         color: #9c9c9c;
       }
-      .yr-popup-btn {
-        background: #4c8dff;
+      .yr-error {
+        color: #ff8a80;
+        background: rgba(255, 82, 82, 0.12);
       }
-      .yr-popup-btn:hover {
-        background: #6ba1ff;
-      }
-      .yr-popup-status-ok {
-        color: #4caf50;
-      }
-      .yr-popup-status-err {
-        color: #ff5252;
+      .yr-notice {
+        color: #cfd8dc;
+        background: rgba(255, 255, 255, 0.07);
       }
     }
-    .yr-popup-title {
-      font-size: 16px;
-      font-weight: 700;
-      margin: 0 0 6px;
+
+    .yr-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
     }
-    .yr-popup-desc {
-      font-size: 12px;
+    .yr-dot {
+      flex: none;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #b0b0b0;
+    }
+    .yr-dot-recording {
+      background: #e62117;
+      animation: yr-pulse 1.2s ease-in-out infinite;
+    }
+    .yr-dot-capturing,
+    .yr-dot-stopping,
+    .yr-dot-exported {
+      background: #1a73e8;
+    }
+    .yr-dot-error {
+      background: #e62117;
+    }
+    @keyframes yr-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.28; }
+    }
+
+    .yr-state {
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .yr-timer {
+      margin-left: auto;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
       color: #8a8a8a;
-      line-height: 1.6;
-      margin: 0 0 14px;
     }
-    .yr-popup-btn {
+    .yr-settings-btn {
+      flex: none;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid rgba(0, 0, 0, 0.18);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .yr-settings-btn:hover {
+      background: rgba(0, 0, 0, 0.05);
+    }
+    @media (prefers-color-scheme: dark) {
+      .yr-settings-btn {
+        border-color: rgba(255, 255, 255, 0.24);
+      }
+      .yr-settings-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+    }
+
+    /* 设置模态框打开时：加宽弹窗并去掉内边距（模态框自带内边距） */
+    body.yr-settings-open {
+      width: 320px;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .yr-hk-hint {
+      margin: 8px 0 0;
+      font-size: 12px;
+      text-align: center;
+      color: #8a8a8a;
+    }
+    .yr-hk-hint[hidden] {
+      display: none;
+    }
+
+    .yr-btn {
       display: block;
       width: 100%;
       height: 40px;
@@ -64,32 +131,144 @@
       font-size: 14px;
       font-family: inherit;
       cursor: pointer;
-      transition: background 0.15s ease;
+      transition: background 0.15s ease, opacity 0.15s ease;
     }
-    .yr-popup-btn:hover {
+    .yr-btn:hover:not(:disabled) {
       background: #1765cc;
     }
-    .yr-popup-status {
-      min-height: 18px;
-      margin-top: 10px;
+    .yr-btn-stop {
+      background: #e62117;
+    }
+    .yr-btn-stop:hover:not(:disabled) {
+      background: #c71f16;
+    }
+    .yr-btn:disabled {
+      background: #ececec;
+      color: #a8a8a8;
+      cursor: not-allowed;
+    }
+    @media (prefers-color-scheme: dark) {
+      .yr-btn:disabled {
+        background: #3a3a3a;
+        color: #7a7a7a;
+      }
+    }
+
+    .yr-btn-ghost {
+      margin-top: 8px;
+      background: transparent;
+      color: #1a73e8;
+      border: 1px solid rgba(26, 115, 232, 0.45);
+    }
+    .yr-btn-ghost:hover:not(:disabled) {
+      background: rgba(26, 115, 232, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      .yr-btn-ghost {
+        color: #6ba1ff;
+        border-color: rgba(107, 161, 255, 0.5);
+      }
+      .yr-btn-ghost:hover:not(:disabled) {
+        background: rgba(107, 161, 255, 0.12);
+      }
+    }
+
+    .yr-tip {
+      margin: 12px 0 0;
       font-size: 12px;
-      line-height: 1.5;
+      line-height: 1.6;
+      color: #8a8a8a;
     }
-    .yr-popup-status-ok {
-      color: #188038;
+
+    .yr-calib {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #8a8a8a;
     }
-    .yr-popup-status-err {
+    .yr-calib > summary {
+      cursor: pointer;
+      outline: none;
+    }
+    .yr-calib-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .yr-calib-row input {
+      width: 58px;
+      height: 26px;
+      padding: 0 6px;
+      border: 1px solid rgba(0, 0, 0, 0.18);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-variant-numeric: tabular-nums;
+    }
+    .yr-calib-tip {
+      margin: 8px 0 0;
+      line-height: 1.6;
+    }
+    @media (prefers-color-scheme: dark) {
+      .yr-calib-row input {
+        border-color: rgba(255, 255, 255, 0.22);
+      }
+    }
+
+    .yr-error {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(229, 33, 23, 0.1);
       color: #c5221f;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-line;
+      max-height: 220px;
+      overflow: auto;
+    }
+    .yr-notice {
+      background: rgba(0, 0, 0, 0.05);
+      color: #5f6368;
     }
   </style>
 </head>
 <body>
-  <p class="yr-popup-title">YouTube Recorder</p>
-  <p class="yr-popup-desc">
-    在 YouTube 播放页打开录制面板。录制仅在你点击「开始录制」后触发，可裁剪播放器区域并保存为 webm。
-  </p>
-  <button id="yr-open-panel" class="yr-popup-btn" type="button">在页面中打开录制面板</button>
-  <div id="yr-popup-status" class="yr-popup-status" role="status"></div>
+  <div class="yr-head">
+    <span id="yr-dot" class="yr-dot yr-dot-idle"></span>
+    <span id="yr-state" class="yr-state">空闲</span>
+    <span id="yr-timer" class="yr-timer" hidden>00:00</span>
+    <button id="yr-settings" class="yr-settings-btn" type="button" title="设置">设置</button>
+  </div>
+
+  <button id="yr-primary" class="yr-btn" type="button">开始录制</button>
+  <button id="yr-select" class="yr-btn yr-btn-ghost" type="button">框选录制</button>
+  <button id="yr-reset" class="yr-btn yr-btn-ghost" type="button" hidden>强制复位并重新开始</button>
+
+  <p id="yr-hk-hint" class="yr-hk-hint" hidden></p>
+
+  <p id="yr-tip" class="yr-tip">正在检测当前页面…</p>
+  <div id="yr-error" class="yr-error" hidden role="status"></div>
+
+  <details class="yr-calib">
+    <summary>画面微调（裁剪位置有偏差时校准）</summary>
+    <div class="yr-calib-row">
+      <label for="yr-offset-y">垂直</label>
+      <input id="yr-offset-y" type="number" step="1" value="0" />
+      <span>px</span>
+      <label for="yr-offset-x">水平</label>
+      <input id="yr-offset-x" type="number" step="1" value="0" />
+      <span>px</span>
+    </div>
+    <p class="yr-calib-tip">
+      正数为把裁剪框向下 / 向右移动。若录制结果里上方多出网页内容、播放器底部被切掉，请增大「垂直」值（如 40）。
+    </p>
+  </details>
+
+  <script src="shared/hotkey.js"></script>
+  <script src="shared/indicator.js"></script>
+  <script src="popup/settings.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
