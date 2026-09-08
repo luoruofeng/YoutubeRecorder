@@ -233,6 +233,96 @@ check(
     "YR_PIP_STATE 广播链路（background → content 状态窗）",
 )
 
+print("== 10. 站点清单一致性（shared/sites.js 注册表为单一数据源） ==")
+# sites.js 是纯浏览器脚本（IIFE 挂 window.YRSites），用 node 模拟 window 求值得到
+# 站点注册表权威清单（id / filePrefix / hostSuffixes），再与各隔离上下文中的副本
+# （offscreen 文件名前缀表、background 站点识别/文案函数、manifest 注入域名）逐项比对，
+# 防止「新增站点只改了部分地方」造成静默漂移（如漏改 offscreen 后文件名退化为通用
+# Video、漏改 background 后通知无站点名、漏改 manifest 后脚本根本不注入）。
+def load_sites_registry():
+    probe = (
+        "global.window = global;"
+        "eval(require('fs').readFileSync(process.argv[1], 'utf8'));"
+        "const L = window.YRSites;"
+        "if (!L || !Array.isArray(L.SITES)) { console.error('SITES 未暴露'); process.exit(2); }"
+        "console.log(JSON.stringify(L.SITES.map(s => ({"
+        "id: s.id, filePrefix: s.filePrefix || '', hosts: (s.hostSuffixes || [])}))))"
+    )
+    res = subprocess.run(
+        ["node", "-e", probe, os.path.join(SRC, "shared", "sites.js")],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        return None, (res.stderr or res.stdout or "").strip()[:300]
+    return json.loads(res.stdout), ""
+
+registry, registry_err = load_sites_registry()
+check(registry is not None, "shared/sites.js 可被 node 求值（读取注册表）", registry_err)
+if registry is None:
+    errors.append("sites.js 求值失败，跳过站点一致性断言")
+else:
+    ids = [s["id"] for s in registry]
+    check(len(ids) == len(set(ids)), "注册表站点 id 无重复")
+    all_hosts = {h for s in registry for h in s["hosts"]}
+    check(
+        all(bool(s["hosts"]) for s in registry),
+        "注册表每条记录 hostSuffixes 非空（第 0 项为站点主域名）",
+    )
+
+    # 10.1 offscreen.js 输出文件名前缀表（每站点键与值都要一致）
+    off_prefix_src = read("offscreen.js")
+    prefix_m = re.search(r"SITE_FILE_PREFIX\s*=\s*\{([^}]*)\}", off_prefix_src)
+    prefix_map = {}
+    if prefix_m:
+        prefix_map = dict(re.findall(r"([A-Za-z0-9_]+)\s*:\s*'([^']*)'", prefix_m.group(1)))
+    check(
+        set(prefix_map.keys()) == set(ids),
+        "offscreen SITE_FILE_PREFIX 站点键与注册表一致",
+        "offscreen=" + ",".join(sorted(prefix_map)) + " sites=" + ",".join(sorted(ids)),
+    )
+    for s in registry:
+        check(
+            prefix_map.get(s["id"]) == s["filePrefix"],
+            "offscreen 前缀值一致: " + s["id"],
+            "offscreen='" + str(prefix_map.get(s["id"])) + "' sites='" + s["filePrefix"] + "'",
+        )
+
+    # 10.2 background.js 站点识别 / 通知文案函数（截取函数体，避免全文其它 return 干扰）
+    def func_body(src, fname):
+        m = re.search(r"function %s\b[\s\S]*?\n  \}" % re.escape(fname), src)
+        return m.group(0) if m else ""
+
+    bg_src = read("background.js")
+    detect_body = func_body(bg_src, "detectSiteFromUrl")
+    name_body = func_body(bg_src, "siteNameForText")
+    bg_tokens = set(re.findall(r"return\s+'([a-z0-9]+)'", detect_body)) | set(
+        re.findall(r"siteId\s*===\s*'([a-z0-9]+)'", name_body)
+    )
+    check(
+        bg_tokens == set(ids),
+        "background 站点识别 / 文案函数与注册表一致",
+        "bg=" + ",".join(sorted(bg_tokens)) + " sites=" + ",".join(sorted(ids)),
+    )
+
+    # 10.3 manifest content_scripts.matches 注入域名（必须含全部主域名、不得含未知域名）
+    injected_hosts = set()
+    for m in cs.get("matches", []):
+        mm = re.match(r"\*://\*\.([^/]+)/\*", m)
+        if mm:
+            injected_hosts.add(mm.group(1))
+    primary_hosts = {s["hosts"][0] for s in registry}
+    check(
+        primary_hosts <= injected_hosts,
+        "manifest.matches 已注入全部站点主域名（hostSuffixes[0]）",
+        "missing=" + ",".join(sorted(primary_hosts - injected_hosts)),
+    )
+    check(
+        injected_hosts <= all_hosts,
+        "manifest.matches 不含注册表之外的未知域名",
+        "extra=" + ",".join(sorted(injected_hosts - all_hosts)),
+    )
+
 print()
 if errors:
     print("RESULT: FAIL (%d 项未通过)" % len(errors))

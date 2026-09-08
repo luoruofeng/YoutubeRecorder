@@ -108,10 +108,14 @@
 
   /** 播放器矩形（倒计时卡片锚定在它中央：直观告诉用户「录的是这块」） */
   function anchorRect() {
-    // 与 content.js 共用同一份候选列表（shared/sites.js：YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 合并）
+    // 与 content.js 共用同一份站点候选（shared/sites.js，按站点归位）：先识别当前站点，
+    // 再取本站点候选 + 通用 `video` 尾兜底；识别失败 / sites.js 缺失时退回本地兜底
+    const lib = window.YRSites || null;
+    const site =
+      lib && typeof lib.detectCurrent === 'function' ? lib.detectCurrent() : null;
     const selectors =
-      window.YRSites && Array.isArray(window.YRSites.PLAYER_SELECTORS) && window.YRSites.PLAYER_SELECTORS.length
-        ? window.YRSites.PLAYER_SELECTORS
+      site && lib && typeof lib.probeSelectorsOf === 'function'
+        ? lib.probeSelectorsOf(site)
         : [
             // 兜底：shared/sites.js 未加载时才走到这里，尽量覆盖常见站点 / 通用 video 的容器
             'video.html5-main-video',

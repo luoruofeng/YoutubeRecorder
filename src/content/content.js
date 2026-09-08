@@ -51,18 +51,24 @@
   /** 心跳间隔（ms）：持续重取，天然覆盖滚动 / 缩放 / 全屏 / SPA 切视频等布局变化 */
   const RECT_INTERVAL_MS = 120;
 
-  /** 站点识别库（shared/sites.js）：提供各站点（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）的播放器候选列表 */
+  /** 站点识别库（shared/sites.js）：站点注册表与各站点播放器候选（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok） */
   const YRSITE_LIB = window.YRSites || null;
+
+  /** 当前页面所属站点定义（由 shared/sites.js 按 host 识别；识别失败为 null，走下方仅含 YouTube 的兜底） */
+  const CURRENT_SITE =
+    YRSITE_LIB && typeof YRSITE_LIB.detectCurrent === 'function' ? YRSITE_LIB.detectCurrent() : null;
 
   /**
    * 播放器候选定位器：按优先级依次探测。
-   * 候选列表由 shared/sites.js 统一维护（YouTube / Bilibili / Dailymotion / Vimeo / Instagram /
-   * Facebook / TikTok 各自的新旧布局 / 容器选择器 + 通用兜底），命中即返回首个真实可见（尺寸 ≥ 4px）的元素矩形。
-   * 站点间选择器天然互不命中，只在 shared/sites.js 缺失时退回下方仅含 YouTube 的兜底。
+   * 候选列表由 shared/sites.js 统一维护，且已**按站点归位** —— 这里只取当前站点的
+   * 播放器候选（probeSelectorsOf 在末尾统一追加通用 `video` 尾兜底），不再遍历全部
+   * 站点的选择器，站间天然隔离、心跳探测更省。命中即返回首个真实可见（尺寸 ≥ 4px）
+   * 的元素矩形。仅当 shared/sites.js 缺失或识别不到当前站点时，退回下方仅含 YouTube
+   * 的本地兜底（与历史行为一致）。
    */
   const PLAYER_SELECTORS =
-    YRSITE_LIB && Array.isArray(YRSITE_LIB.PLAYER_SELECTORS) && YRSITE_LIB.PLAYER_SELECTORS.length
-      ? YRSITE_LIB.PLAYER_SELECTORS
+    CURRENT_SITE && YRSITE_LIB && typeof YRSITE_LIB.probeSelectorsOf === 'function'
+      ? YRSITE_LIB.probeSelectorsOf(CURRENT_SITE)
       : [
           'video.html5-main-video', // 新布局：主视频元素
           '#movie_player video', // 播放器容器内 video
@@ -81,15 +87,18 @@
   /**
    * 容器级兜底候选（仅当 PLAYER_SELECTORS 全部 miss 时尝试）：
    * 命中元素不要求内部包含 <video>，直接使用容器矩形作为录制区矩形。
-   * 主要服务 Dailymotion 与 Vimeo：两者通常把真实 <video> 渲染进主文档（可被上面
-   * 的 video 候选命中）；但个别页面 / 改版后 <video> 可能在跨域 iframe 或 shadow DOM
-   * 里（content script 受同源策略读不到），此时退而取主文档中矩形一致的播放器外壳
+   * 同样取自当前站点定义（shared/sites.js 只在 Dailymotion 与 Vimeo 上登记了此列表）：
+   * 两者通常把真实 <video> 渲染进主文档（可被上面候选命中）；但个别页面 / 改版后
+   * <video> 可能在跨域 iframe 或 shadow DOM 里（content script 受同源策略读不到），
+   * 此时退而取主文档中矩形一致的播放器外壳
    * （Dailymotion：#player-wrapper / Player__player / TopPlayer__placeholder 等；
    * Vimeo：.vp-player-layout / .vp-player / .vp-video 等）作为录制区；
-   * 其他站点容器往往内嵌其它 UI，不纳入此列表。
+   * 其他站点容器往往内嵌其它 UI，不在注册表登记此列表。
    */
   const PLAYER_CONTAINER_SELECTORS =
-    YRSITE_LIB && Array.isArray(YRSITE_LIB.CONTAINER_SELECTORS) ? YRSITE_LIB.CONTAINER_SELECTORS : [];
+    CURRENT_SITE && YRSITE_LIB && typeof YRSITE_LIB.containerSelectorsOf === 'function'
+      ? YRSITE_LIB.containerSelectorsOf(CURRENT_SITE)
+      : [];
 
   /** 诊断日志（仅写控制台，页面内无 UI 可展示） */
   function dlog(text) {
