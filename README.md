@@ -13,22 +13,46 @@
   <a href="README.it.md">Italiano</a>
 </div>
 
-Chrome Manifest V3 浏览器扩展：在 YouTube 播放页**手动点击**触发录制，捕获当前标签页的完整画面与页面音频，在浏览器内用 Canvas 逐帧裁剪出**播放器区域（或你框选的任意区域）**，最终输出**带音频的视频文件**并下载到本地——原生优先输出 **MP4（H.264/AAC）**，浏览器或系统不支持时自动回退为 **WebM**。
+Chrome Manifest V3 浏览器扩展：在 **YouTube、Bilibili（哔哩哔哩）、Dailymotion、Vimeo、Instagram、Facebook、TikTok** 等支持站点的视频页**手动点击**触发录制，捕获当前标签页的完整画面与页面音频，在浏览器内用 Canvas 逐帧裁剪出**播放器真实画面区域（或你框选的任意区域）**，最终输出**带音频的视频文件**并下载到本地——原生优先输出 **MP4（H.264/AAC）**，浏览器或系统不支持时自动回退为 **WebM**。
+
+录制站点可自动识别：扩展会按当前页面域名判断站点，输出文件的命名前缀与弹窗 / 通知里的站点文案随之自动切换（详见下文「支持的站点」）。
 
 ## 特性
 
+- **七大视频站点一站录制**：YouTube / Bilibili（B 站）/ Dailymotion / Vimeo / Instagram / Facebook / TikTok 的官网原生视频页均可录制，全部走同一条链路（tabCapture → 定位播放器 → Canvas 裁剪 → MediaRecorder），自动识别当前站点并切换文件名前缀与站点文案；各站点的新旧播放器布局差异统一收敛在 `src/shared/sites.js`，一处维护（详见下文「支持的站点」）。
 - **零第三方依赖**：无 npm、无构建步骤、无 ffmpeg、无任何二次转码（MP4 由浏览器 `MediaRecorder` 原生录制，而非录后转换）。
 - **两种录制模式**
   - **整页录制**：自动定位播放器「真实画面矩形」（结合 `object-fit` / `object-position` 计算，剔除黑边、剧场模式留白与播放器外壳），只录画面本身。
   - **框选录制**：在页面上拖拽框选任意矩形，只录该区域。
 - **画面绝对干净**：录制控件全部位于扩展图标弹窗（popup 是独立扩展页面，不属于被捕获标签页的渲染内容），成片中不会出现任何扩展 UI。
-- **页面快捷键**：默认单键 `R` → 空闲时开始录制、录制中停止并保存；可在弹窗「设置」里自由改成 `Ctrl` / `Alt` / `Shift` / `Command` 组合键。快捷键仅在 YouTube 页面生效，不误伤其它标签页，也不与浏览器全局快捷键冲突。
+- **页面快捷键**：默认单键 `R` → 空闲时开始录制、录制中停止并保存；可在弹窗「设置」里自由改成 `Ctrl` / `Alt` / `Shift` / `Command` 组合键。快捷键仅在受支持站点的视频页获得焦点时生效，不误伤其它标签页，也不与浏览器全局快捷键冲突。
 - **录制期自动锁定页面**：半透明遮罩按画面矩形「挖洞」盖住画面以外区域，屏蔽滚动、点击与破坏性快捷键；**播放 / 暂停、进度、音量、字幕、倍速等纯播放控制依然可用**。
 - **稳定裁剪**：固定 30fps 输出；画布尺寸首帧锁定；裁剪矩形需连续稳定 3 帧才启动录制，避免广告 / 剧场切换等瞬态大矩形被锁进成片。
 - **音频不丢**：捕获到的音轨经 `AudioContext` 回放，避免原标签页在录制期间被静音导致成片无声。
 - **全屏也能看到「正在录制」**：全屏播放时画面铺满、遮罩提示无处安放，此时用常驻系统通知与 Document PiP 置顶状态窗（REC + 计时 + 停止按钮）显示状态，画面有黑边时还会在黑边内描细红框 —— 所有指示都在被捕获画面之外，**不会进入视频**；可在弹窗「设置 → 全屏录制状态提示」逐项开关。
 - **异常兜底齐全**：DRM 黑屏检测、切标签页 / 页面跳转自动停止并导出、心跳中断主动拉取自愈、下载失败自动重试、残留会话「强制复位并重新开始」。
 - **录制只由用户点击触发**，绝无后台静默捕获。
+
+## 支持的站点
+
+录制链路（tabCapture → 定位播放器 → Canvas 裁剪 → MediaRecorder）在各站点上完全一致，差异只有三点：**注入域名**（见 `manifest.json` 的 `content_scripts.matches`）、**定位播放器所用的 DOM 选择器**、以及**文件名前缀 / 文案里的站点名**。下表是当前支持的站点与适用页面：
+
+| 站点 | 可录制的页面形态 | 说明与限制 |
+| --- | --- | --- |
+| YouTube | 视频播放页（`youtube.com/watch…`、Shorts 等） | 会员 / 付费 / DRM 片源画面会黑屏（浏览器保护，见下方通用限制） |
+| Bilibili（B 站） | 视频播放页（`bilibili.com/video/BV…`） | 新版 bpx 与旧版 bilibili 播放器均已覆盖；受大会员 / DRM 限制的番剧影视可能出现黑屏；**直播不在支持范围** |
+| Dailymotion | 视频播放页（`dailymotion.com/video/…`） | 播放器 `<video>` 被跨域 iframe / shadow DOM 封装（主文档读不到）时，自动退回播放器外壳容器矩形定位 |
+| Vimeo | 视频播放页（`vimeo.com/…`） | 私有视频需登录且具备查看权限 |
+| Instagram | 帖文 / Reel / 快拍（打开后的模态视图）、主页 Feed 单条视频 | 部分内容需登录后才有可播放的视频 |
+| Facebook | Watch / Reel / 单视频弹层 / 时间线中的视频 | 部分内容需登录；时间线同屏多条视频时自动命中「当前可见的主视频」 |
+| TikTok | 视频详情页（`tiktok.com/@…/video/…`）、打开的视频弹层、For You 信息流单条 | 信息流同屏多条预览时自动命中「正在播放 / 可见面积最大」的一条 |
+
+> **定位机制**：content 脚本按「站内真实可见的 `<video>`」定位录制区域。`src/shared/sites.js` 统一维护各站点新旧布局的播放器容器 / video 候选选择器，命中容器后再取其内部 `<video>`，并按 `object-fit` / `object-position` 换算出实际画出的画面矩形（剔除黑边、外壳与留白）；全部候选落空时，再用「可见面积最大的已解码 `<video>`」作通用兜底（递归覆盖 open shadow DOM）。因此主播放器必须把真实 `<video>` 渲染进页面主文档（或可读的 open shadow root）——**从其它网页里跨域 iframe 内嵌的播放器不在支持范围**；纯 canvas / WebGL 等非 `<video>` 的自绘画面无法自动定位，请改用「框选录制」。
+
+> **通用限制**：
+> - 受 DRM / 会员付费保护的视频（各平台的付费电影、订阅专享、独家版权内容等）在捕获画面中会黑屏，这是浏览器「受保护内容」限制，非扩展缺陷；
+> - 需要登录的内容（Instagram / Facebook / TikTok 的大部分视频、B 站部分番剧等）请先在浏览器中登录对应站点；
+> - 站点改版导致选择器漂移时，若页面同屏存在多条可见 `<video>`，录制区默认取可见面积最大且正在解码的那个——请把目标视频放在视口内播放。
 
 ## 目录结构
 
@@ -42,17 +66,21 @@ src/
 ├── offscreen.js             录制核心：getUserMedia 消费 tab 流 → 隐藏 video → canvas 裁剪 → MediaRecorder → Blob
 ├── shared/
 │   ├── hotkey.js            「开始 / 停止录制」快捷键公共定义（popup 设置 / 弹窗提示 / content 监听共用）
-│   └── indicator.js         全屏录制状态指示三开关（pip / notif / border）的读写（popup / content / guard 共用）
+│   ├── indicator.js         全屏录制状态指示三开关（pip / notif / border）的读写（popup / content / guard 共用）
+│   ├── countdown.js         「开始录制前倒计时」秒数的公共定义与读写（popup / content / background 共用）
+│   └── sites.js             支持的站点识别（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）
+│                          与各站点播放器候选选择器（content / popup / countdown 共用）
 ├── content/
 │   ├── guard.js             录制期页面锁定遮罩（按画面矩形挖洞）+ 全屏黑边红框
 │   ├── pip.js               全屏 Document PiP 置顶状态窗（REC + 计时 + 停止按钮）
 │   ├── selector.js          框选录制选择器（点击「框选录制」后按需启用）
+│   ├── countdown.js         「开始录制前倒计时」页面浮层（先撤浮层、后开捕获）
 │   ├── content.js           无界面脚本：播放器矩形心跳上报 + 页面隐藏 / 跳转通知 + 开关遮罩
 │   └── hotkey.js            页面级「开始 / 停止录制」快捷键监听
 ├── popup.html               扩展图标弹窗：录制控制台（开始 / 框选 / 停止 / 状态 / 计时 / 提示 / 设置）
 ├── popup.js
 ├── popup/
-│   └── settings.js          设置模态框（快捷键、全屏录制状态提示开关）
+│   └── settings.js          设置模态框（快捷键、开始前倒计时、全屏录制状态提示开关）
 ├── assets/                  静态资源
 ├── icons/                   16/32/48/128 图标
 └── types/                   chrome.* API 类型声明（仅类型标注）
@@ -63,7 +91,7 @@ scripts/verify_extension.py  扩展静态自检脚本
 
 `chrome.tabCapture` 不能在 content script 中调用；而裁剪所需的 `video` / `canvas` / `MediaRecorder` 又必须运行在有 DOM 的窗口上下文；popup 会失焦关闭、Service Worker 没有 DOM。因此录制核心落在 **offscreen document** 上：
 
-1. **content script**（自身零注入 UI，只上报数据）每 ~120ms 定位播放器，上报「真实画面矩形」与视口基准（CSS 尺寸 / `devicePixelRatio` / 可视视口偏移）。
+1. **content script**（自身零注入 UI，只上报数据）按当前站点（由 `shared/sites.js` 识别）在受支持页面内定位播放器，每 ~120ms 上报「真实画面矩形」与视口基准（CSS 尺寸 / `devicePixelRatio` / 可视视口偏移）。
 2. **background** 按需创建离屏文档，并在用户手势链路内调用 `chrome.tabCapture.getMediaStreamId()` 取得 `streamId`。
 3. **离屏**用 `getUserMedia({ chromeMediaSourceId: streamId })` 消费全页流（画面 + 页面音频）。
 4. **离屏**内完成：隐藏 `video` 播放全页流 → 隐藏 `canvas` 逐帧 `drawImage` 裁剪 → `canvas.captureStream(30)` 视频轨 + 原始 `audioTrack` 合流 → `MediaRecorder` 录制（`video/mp4` 优先、逐级回退 `video/webm`）→ 组装 Blob。
@@ -82,16 +110,16 @@ scripts/verify_extension.py  扩展静态自检脚本
 
 ## 使用
 
-1. 打开任意 **YouTube 播放页**（公开视频；DRM / 会员付费视频画面会黑屏，属浏览器保护限制）。
-2. 点击扩展图标 → 弹窗中点击「**开始录制**」（请保持该标签页可见、播放器完整在视口内）。
+1. 打开任一受支持站点的视频页（见上文「支持的站点」，如 YouTube 播放页、B 站 `video/BV…` 页、TikTok 视频详情页等；首次访问某页面需刷新一次以便注入脚本）。请保持视频可正常播放，DRM / 会员付费视频画面会黑屏，属浏览器保护限制。
+2. 点击扩展图标 → 弹窗「开始录制」按钮变为可用即说明当前页为受支持的视频页且脚本已就绪，点击「**开始录制**」（请保持该标签页可见、播放器完整在视口内）。
    - 浏览器 / 系统不支持原生 MP4（Chrome < 126 或缺少 H.264/AAC 编码器）时，弹窗底部会说明本次将回退为 WebM。
    - 录制中图标上会显示红色 `REC` 徽标；关闭弹窗不影响录制，再点图标即可继续操作。
 3. **框选录制**（可选）：点击「**框选录制**」→ 弹窗自动关闭 → 在页面上拖拽框选区域 → 点「开始录制选区」（按 `Esc` 可退出选择器）。
    - 录制中「停止录制」按钮会**自动排布到选区之外**，绝不会被裁进成片；若选区几乎铺满视口放不下按钮，页面内控件会隐藏，此时请用扩展弹窗或快捷键停止。
-4. 结束时点击「**停止并保存**」→ 自动组装并下载 `YouTube-年月日-时分秒.mp4`（回退环境则为 `.webm`）。
-5. **快捷键**：在 YouTube 播放页按下默认快捷键 `R` 开始录制，录制中再按一次 `R` 停止并保存。
+4. 结束时点击「**停止并保存**」→ 自动组装并下载 `站点名-年月日-时分秒.mp4`（文件名前缀随站点自动切换，如 `YouTube-20240908-153000.mp4`、`Bilibili-20240908-153000.mp4`；回退环境则为 `.webm`）。
+5. **快捷键**：在受支持站点的视频页按下默认快捷键 `R` 开始录制，录制中再按一次 `R` 停止并保存。
    - 点击弹窗右上角的「**设置**」可修改快捷键：点击按键框后直接按下新组合键，按 `Esc` 取消修改；改完即时生效，无需刷新页面。
-   - 快捷键仅在 YouTube 页面获得焦点时生效，在搜索框 / 评论框等输入区域不会触发；若与浏览器或 YouTube 播放器快捷键冲突，设置面板会给出提示。
+   - 快捷键仅在受支持站点的视频页获得焦点时生效，在搜索框 / 评论框等输入区域不会触发；若与浏览器或站点播放器快捷键冲突，设置面板会给出提示。
 6. **画面微调**（弹窗底部折叠项）：个别环境（异常缩放组合、多显示器混插）裁剪仍可能有固定偏差，可填「垂直 / 水平」像素值手动平移裁剪框（正数 = 向下 / 向右）。
 7. **录制期间页面会被遮罩锁定**（整页录制模式）：
    - 画面以外全部盖上半透明黑，点不到任何按钮 / 链接，滚轮与触摸滑动被拦截，页面滚动位置锁定。
@@ -122,7 +150,7 @@ scripts/verify_extension.py  扩展静态自检脚本
 | `storage` | `session` 级保存录制状态与启动意图；`sync` 级保存快捷键、画面微调与全屏录制状态提示开关 |
 | `notifications` | 全屏录制状态指示：录制中常驻「正在录制」通知（可点按钮停止）+ 保存成功 / 失败回执（可在设置关闭） |
 
-无 `host_permissions`、无网络请求、无任何用户数据采集。
+扩展不声明 `host_permissions`、不发任何网络请求、不采集任何用户数据；content 脚本仅在上述七个受支持站点域名下按 `content_scripts.matches` 注入并生效，其它站点既不会注入脚本也不会有任何动作。
 
 ## 静态自检
 
@@ -130,11 +158,11 @@ scripts/verify_extension.py  扩展静态自检脚本
 python3 scripts/verify_extension.py
 ```
 
-覆盖：manifest / MV3 / 必需文件、YouTube 域名限定与注入顺序、最小权限、零第三方依赖、全部 JS 语法（`node --check`）、API 上下文边界（content 不直接调用 `tabCapture` / `downloads` / `offscreen`）、页面注入边界（控件必须位于扩展弹窗；唯一允许建 DOM 的 `content/guard.js` 必须按画面矩形挖洞、洞内留空、可随会话移除）、快捷键模块边界。
+覆盖：manifest / MV3 / 必需文件、支持站点（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）域名限定与注入顺序（`shared/hotkey.js` → `shared/indicator.js` → `shared/sites.js` → `content/guard.js` → `content/pip.js` → `content/selector.js` → `content/countdown.js` → `content/content.js` → `content/hotkey.js`）、最小权限、零第三方依赖、全部 JS 语法（`node --check`）、API 上下文边界（content 不直接调用 `tabCapture` / `downloads` / `offscreen`）、页面注入边界（控件必须位于扩展弹窗；唯一允许建 DOM 的 `content/guard.js` 必须按画面矩形挖洞、洞内留空、可随会话移除）、快捷键模块边界。
 
 ## 手动验收清单（对应 `TODO.md` 任务 20）
 
-按上述「加载 + 使用」操作后逐项验收：
+按上述「加载 + 使用」操作后逐项验收。**多站点部分**：请在 YouTube 之外至少再选两家新接入站点（如 Bilibili、TikTok）完整跑一遍「开始 → 停止并保存」流程，确认弹窗 / 通知正确显示对应站点名、输出文件名为对应前缀（如 `Bilibili-*.mp4`）、画面仅含该站播放器区域且不偏移。以下各项中的播放页均指受支持站点的视频页：
 
 - [ ] 20.1 扩展图标弹窗正常打开：状态 / 计时 / 按钮随录制阶段正确变化；录制中图标显示红色 `REC` 徽标。
 - [ ] 20.2 点「开始录制」→ 捕获成功（状态「正在录制」+ 计时走动）→ 点「停止并保存」→ 浏览器下载 mp4 文件（不支持原生 MP4 的环境弹窗会提示并以 webm 下载）。

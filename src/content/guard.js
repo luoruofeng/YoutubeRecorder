@@ -80,7 +80,12 @@
   const TIP_DETAIL =
     '视频播放控制（播放 / 暂停、进度、音量、字幕、倍速）可正常操作；\n' +
     '请勿滚动页面、缩放窗口，也不要点击视频以外的按钮或链接。\n' +
-    '需要结束时，请{HK}点击浏览器工具栏中的扩展图标 →「停止并保存」。';
+    '需要结束时，请{HK}点击浏览器工具栏中的扩展图标 →「停止并保存」。\n' +
+    '如需离开本页（点书签 / 地址栏跳转 / 刷新 / 关闭），浏览器会先弹出确认框。';
+  /** 提示框内「停止并保存」按钮文案（点击即走与快捷键一致的停止链路） */
+  const TIP_STOP_TEXT = '停止并保存视频';
+  /** 按钮被点击后、遮罩随会话结束移除前的短暂状态文案 */
+  const TIP_STOPPING_TEXT = '正在停止…';
   const TIP_RESIZE = '检测到窗口尺寸变化，画面裁剪可能偏移，建议停止后重新录制。';
   const RESIZE_NOTICE =
     '录制中检测到窗口尺寸变化：画面裁剪可能偏移（录制开始后画布尺寸已锁定）。建议点击扩展图标「停止并保存」后重新录制。';
@@ -106,9 +111,12 @@
   /**
    * 允许点击播放器后仍需拦截的控件（与上面的快捷键一一对应）：
    * 全屏 / 迷你播放器 / 剧场模式会改变布局；静音会让录制的音轨无声。
-   * class 选择器走 YouTube 播放器的稳定类名，aria-keyshortcuts 作为改版兜底。
+   * YouTube 走稳定类名 + aria-keyshortcuts 兜底；Bilibili 同时覆盖旧版
+   * （.bilibili-player-*）与新版 bpx（.bpx-player-*）播放器的全屏 / 静音按钮，
+   * 并以 #bilibili-player 作用域内的 aria-label / title 中文文案作为改版兜底。
    */
   const BLOCKED_CONTROLS_SELECTOR = [
+    // ---------- YouTube ----------
     '.ytp-fullscreen-button',
     '.ytp-miniplayer-button',
     '.ytp-size-button',
@@ -117,6 +125,26 @@
     '[aria-keyshortcuts="t"]',
     '[aria-keyshortcuts="i"]',
     '[aria-keyshortcuts="m"]',
+    // ---------- Bilibili（bpx 新版播放器） ----------
+    '.bpx-player-ctrl-full',
+    '.bpx-player-ctrl-web-full',
+    '.bpx-player-ctrl-widescreen', // 宽屏 / 影院模式会改变播放器布局（等同剧场模式 t）
+    '.bpx-player-ctrl-mute',
+    // ---------- Bilibili（旧版播放器） ----------
+    '.bilibili-player-icon-fullscreen',
+    '.bilibili-player-icon-statefullscreen',
+    '.bilibili-player-icon-web-fullscreen',
+    '.bilibili-player-icon-fixfullscreen',
+    '.bilibili-player-video-btn-fullscreen',
+    '.bilibili-player-icon-widescreen',
+    '.bilibili-player-icon-mute',
+    // ---------- Bilibili 中文文案兜底（限定播放器作用域内） ----------
+    '#bilibili-player [aria-label*="全屏"]',
+    '#bilibili-player [aria-label*="宽屏"]',
+    '#bilibili-player [aria-label*="静音"]',
+    '#bilibili-player [title*="全屏"]',
+    '#bilibili-player [title*="宽屏"]',
+    '#bilibili-player [title*="静音"]',
   ].join(',');
 
   /** 被拦控件的提示限频（ms）：连点时不刷屏 */
@@ -264,6 +292,40 @@
     );
     detail.textContent = TIP_DETAIL.replace('{HK}', '');
 
+    // 「停止并保存」按钮。点击后发送与页面快捷键（content/hotkey.js）完全相同的
+    // YR_HOTKEY 消息，由 background 按当前状态决定动作——录制中即进入现有的
+    // 「停止并保存」流程，这里不引入任何新的保存 / 停止逻辑。
+    // tip 整块 pointer-events:none（文字只读不拦截点击），仅按钮自身 pointer-events:auto；
+    // 按钮随 tip 位于洞外（遮罩上），绝不会被录进视频。
+    const stopBtn = makeEl(
+      'button',
+      NS + '-tip-stop',
+      'display:flex;align-items:center;justify-content:center;' +
+        'margin:10px auto 0;min-width:132px;height:32px;padding:0 18px;' +
+        'border:none;border-radius:8px;outline:none;' +
+        'background:#e62117;color:#fff;' +
+        'font:600 13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,' +
+        '"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;' +
+        'cursor:pointer;pointer-events:auto;user-select:none;' +
+        'transition:background .15s ease,opacity .15s ease;'
+    );
+    stopBtn.type = 'button';
+    stopBtn.textContent = TIP_STOP_TEXT;
+    stopBtn.addEventListener('click', () => {
+      if (stopBtn.disabled) return; // 防连点：停止流程不可重复触发
+      stopBtn.disabled = true;
+      stopBtn.textContent = TIP_STOPPING_TEXT;
+      stopBtn.style.opacity = '.55';
+      try {
+        chrome.runtime.sendMessage({ type: 'YR_HOTKEY' }, () => {
+          // 回执仅用于消化 lastError（background 无监听方时不产生控制台告警）
+          void chrome.runtime.lastError;
+        });
+      } catch (err) {
+        /* 扩展上下文失效（升级 / 重载）：忽略 */
+      }
+    });
+
     const warn = makeEl(
       'div',
       NS + '-tip-warn',
@@ -273,6 +335,7 @@
 
     tip.appendChild(row);
     tip.appendChild(detail);
+    tip.appendChild(stopBtn);
     tip.appendChild(warn);
 
     root.appendChild(veils.top);
@@ -353,6 +416,9 @@
   /**
    * 放置提示文案：必须放在洞外（否则会被录进视频）。
    * 优先放在画面下方空间，其次上方；空间不足时先降级为单行，仍放不下则隐藏。
+   * 提示框内含「停止并保存」按钮，因此按实际高度自适应降级：
+   * 先按完整内容（标题 + 副文案 + 按钮）测量，放不下时隐藏副文案再测，
+   * 让标题与按钮优先可见（都是同步排版，不会出现闪烁 / 中间帧）。
    */
   function placeTip(vw, vh, hole) {
     const tip = S.tip;
@@ -366,9 +432,13 @@
     const regionH = useBottom ? bottomH : topH;
 
     tip.style.maxWidth = Math.round(Math.min(vw * 0.92, 720)) + 'px';
-    S.tipDetail.style.display = regionH >= 104 ? 'block' : 'none';
+    S.tipDetail.style.display = 'block';
     tip.style.display = 'block';
-    const h = tip.offsetHeight || 0;
+    let h = tip.offsetHeight || 0;
+    if (regionH < h + 8) {
+      S.tipDetail.style.display = 'none'; // 副文案降级隐藏，保住标题与停止按钮
+      h = tip.offsetHeight || 0;
+    }
     if (!h || regionH < h + 8) {
       tip.style.display = 'none'; // 绝不允许压到被录画面上
       return;
@@ -543,11 +613,11 @@
     }
   }
 
-  /** 双击画面 = YouTube 切换全屏（改变布局），同快捷键 f 一并拦掉 */
+  /** 双击画面 = YouTube / Bilibili 播放器切换全屏（改变布局），同快捷键 f 一并拦掉 */
   function onDblClick(e) {
     const el = e.target;
     if (!el || typeof el.closest !== 'function') return;
-    if (!el.closest('video, #movie_player, #movie_player *')) return;
+    if (!el.closest('video, #movie_player, #movie_player *, #bilibili-player, #bilibili-player *')) return;
     e.preventDefault();
     e.stopPropagation();
   }

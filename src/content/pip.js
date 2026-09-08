@@ -88,7 +88,7 @@
       'margin:0;overflow:hidden;background:rgba(10,10,12,.92);color:#fff;' +
       'font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,' +
       '"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;';
-    doc.title = '正在录制 · YouTube Recorder';
+    doc.title = '正在录制 · 视频录制器';
 
     const row = make(
       'div',

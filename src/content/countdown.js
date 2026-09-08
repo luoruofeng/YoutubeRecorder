@@ -108,12 +108,21 @@
 
   /** 播放器矩形（倒计时卡片锚定在它中央：直观告诉用户「录的是这块」） */
   function anchorRect() {
-    const selectors = [
-      'video.html5-main-video',
-      '#movie_player video',
-      '.html5-video-container video',
-      '#movie_player',
-    ];
+    // 与 content.js 共用同一份候选列表（shared/sites.js：YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 合并）
+    const selectors =
+      window.YRSites && Array.isArray(window.YRSites.PLAYER_SELECTORS) && window.YRSites.PLAYER_SELECTORS.length
+        ? window.YRSites.PLAYER_SELECTORS
+        : [
+            // 兜底：shared/sites.js 未加载时才走到这里，尽量覆盖常见站点 / 通用 video 的容器
+            'video.html5-main-video',
+            '#movie_player video',
+            '.html5-video-container video',
+            '#movie_player',
+            '#bilibili-player video',
+            '.bpx-player-video-wrap video',
+            '#player video',
+            'video',
+          ];
     for (const selector of selectors) {
       let el = null;
       try {

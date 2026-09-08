@@ -537,8 +537,10 @@
     S.btnCancel.style.opacity = '0.5';
     updateLayout(); // 立刻撤掉页面内控件：离屏随时可能开始出帧
 
-    // 发消息给 background 开始录制
-    chrome.runtime.sendMessage({ type: 'YR_START' }, (resp) => {
+    // 发消息给 background 开始录制（附上当前站点：content 侧由 shared/sites.js 识别）
+    const currentSite =
+      window.YRSites && typeof window.YRSites.detectCurrent === 'function' ? window.YRSites.detectCurrent() : null;
+    chrome.runtime.sendMessage({ type: 'YR_START', site: currentSite ? currentSite.id : '' }, (resp) => {
       // 恢复按钮基础样式
       S.starting = false;
       S.btnStart.disabled = false;

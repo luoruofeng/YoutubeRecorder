@@ -40,6 +40,34 @@
   /** 当前录制关联的标签页 ID（用于路由离屏广播给 content script） */
   let activeTabId = null;
 
+  /** 当前录制关联的站点 id（'youtube' / 'bilibili' / 'dailymotion' / 'vimeo' / 'instagram' / 'facebook' / 'tiktok'，由 popup 上报或从标签页 URL 识别） */
+  let activeSiteId = null;
+
+  /** 从标签页 URL 识别站点；识别不到返回 null（文件名等按通用名处理） */
+  function detectSiteFromUrl(url) {
+    const host = String(url || '').toLowerCase();
+    if (host.indexOf('dailymotion.com') >= 0) return 'dailymotion';
+    if (host.indexOf('bilibili.com') >= 0) return 'bilibili';
+    if (host.indexOf('youtube.com') >= 0) return 'youtube';
+    if (host.indexOf('vimeo.com') >= 0) return 'vimeo';
+    if (host.indexOf('instagram.com') >= 0) return 'instagram';
+    if (host.indexOf('facebook.com') >= 0) return 'facebook';
+    if (host.indexOf('tiktok.com') >= 0) return 'tiktok';
+    return null;
+  }
+
+  /** 站点 id → 通知标题里的站点名（未知站点返回空串，标题退化为通用文案） */
+  function siteNameForText(siteId) {
+    if (siteId === 'dailymotion') return 'Dailymotion';
+    if (siteId === 'bilibili') return 'Bilibili';
+    if (siteId === 'youtube') return 'YouTube';
+    if (siteId === 'vimeo') return 'Vimeo';
+    if (siteId === 'instagram') return 'Instagram';
+    if (siteId === 'facebook') return 'Facebook';
+    if (siteId === 'tiktok') return 'TikTok';
+    return '';
+  }
+
   // ===================== 全局状态（popup 查询 + 图标徽标） =====================
   //
   // 录制控件已全部迁移到扩展图标弹窗（页面内不再注入任何 DOM，保证画面干净），
@@ -115,13 +143,14 @@
     }
   }
 
-  /** 录制中常驻通知（全屏场景的「正在录制」指示） */
+  /** 录制中常驻通知（全屏场景的「正在录制」指示；标题按录制站点显示） */
   function showRecordingNotif() {
+    const siteText = siteNameForText(activeSiteId);
     createNotif(NOTIF_REC_ID, {
       type: 'basic',
-      title: '正在录制 YouTube 视频',
+      title: '正在录制' + (siteText ? ' ' + siteText + ' ' : ' ') + '视频',
       message: '全屏观看时本通知保持可见；完成后视频自动保存到下载目录。',
-      contextMessage: 'YouTube Recorder',
+      contextMessage: '视频录制器（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）',
       requireInteraction: true,
       priority: 1,
       buttons: [{ title: '停止并保存' }],
@@ -134,7 +163,7 @@
       type: 'basic',
       title: ok ? '录制完成 · 视频已保存' : '录制完成 · 保存失败',
       message: message || (ok ? '视频已保存到下载目录。' : '未能保存文件，请检查浏览器下载设置。'),
-      contextMessage: 'YouTube Recorder',
+      contextMessage: '视频录制器（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）',
       requireInteraction: false,
     });
   }
@@ -384,8 +413,8 @@
       }
     };
 
-    const promise = streamId 
-      ? Promise.resolve({ createdAt: Date.now(), streamId, tabId })
+    const promise = streamId
+      ? Promise.resolve({ createdAt: Date.now(), streamId, tabId, site: activeSiteId })
       : ensurePendingStart(tabId);
 
     promise
@@ -437,7 +466,7 @@
     }
 
     const streamId = await getTabMediaStreamId(tabId);
-    const next = { createdAt: Date.now(), streamId, tabId };
+    const next = { createdAt: Date.now(), streamId, tabId, site: activeSiteId };
     await setPendingStart(next);
     return next;
   }
@@ -478,23 +507,31 @@
         if (!pendingStart || !pendingStart.streamId) {
           throw new Error('缺少可用的标签页流启动信息，请重新点击「开始录制」。');
         }
-        chrome.runtime.sendMessage({ type: 'REC_START', streamId: pendingStart.streamId, tabId: pendingStart.tabId }, (resp) => {
-          if (chrome.runtime.lastError) {
-            // 离屏尚在加载、无监听方：消息已丢失。streamId 已保存在 storage.session，
-            // 等 OFFSCREEN_READY 后再补发同一条启动请求。
-            console.log('[YR-bg] 离屏未就绪（lastError），依赖 streamId 持久化与 READY 队列双兜底');
-            pendingStartResponders.push(respond);
-            return;
+        chrome.runtime.sendMessage(
+          {
+            type: 'REC_START',
+            streamId: pendingStart.streamId,
+            tabId: pendingStart.tabId,
+            site: pendingStart.site || activeSiteId,
+          },
+          (resp) => {
+            if (chrome.runtime.lastError) {
+              // 离屏尚在加载、无监听方：消息已丢失。streamId 已保存在 storage.session，
+              // 等 OFFSCREEN_READY 后再补发同一条启动请求。
+              console.log('[YR-bg] 离屏未就绪（lastError），依赖 streamId 持久化与 READY 队列双兜底');
+              pendingStartResponders.push(respond);
+              return;
+            }
+            // 离屏已响应（ok / busy）→ 本次意图已被消费，清除 storage 标记
+            clearPendingStart();
+            try {
+              if (resp && (resp.ok || resp.busy)) respond(resp);
+              else respond({ ok: false, code: 'unknown', message: '离屏未确认录制启动' });
+            } catch (err) {
+              /* 发起方已离开：忽略 */
+            }
           }
-          // 离屏已响应（ok / busy）→ 本次意图已被消费，清除 storage 标记
-          clearPendingStart();
-          try {
-            if (resp && (resp.ok || resp.busy)) respond(resp);
-            else respond({ ok: false, code: 'unknown', message: '离屏未确认录制启动' });
-          } catch (err) {
-            /* 发起方已离开：忽略 */
-          }
-        });
+        );
       })
       .catch((err) => {
         try {
@@ -556,8 +593,8 @@
       setRectReport(true);
       setPhase('capturing', { error: null, notice: '', durationMs: 0 });
 
-      // 将 streamId 暂存并启动离屏录制
-      const pendingStart = { createdAt: Date.now(), streamId, tabId: targetTabId };
+      // 将 streamId 暂存并启动离屏录制（附带站点，供离屏生成对应前缀的输出文件名）
+      const pendingStart = { createdAt: Date.now(), streamId, tabId: targetTabId, site: activeSiteId };
       setPendingStart(pendingStart).then(() => {
         startRecording(targetTabId, respondStart, streamId);
       });
@@ -768,7 +805,14 @@
         const respondStart = sendResponse || function () {};
         const targetTabId = message.tabId || (sender.tab && sender.tab.id);
 
-        console.log('[YR-bg] 收到 YR_START → tab=' + targetTabId);
+        // 站点由 popup 上报（content 侧 YR_PING 已带 site）；兜底按标签页 URL 识别
+        if (message.site) activeSiteId = message.site;
+        else if (sender.tab && sender.tab.url) {
+          const detectedSite = detectSiteFromUrl(sender.tab.url);
+          if (detectedSite) activeSiteId = detectedSite;
+        }
+
+        console.log('[YR-bg] 收到 YR_START → tab=' + targetTabId + '，site=' + (activeSiteId || '未知'));
         requestStart(targetTabId, respondStart);
         return true; // 异步回执
       }
@@ -807,6 +851,9 @@
         // 状态权威在 background —— 弹窗可以随时开关，页面侧不缓存任何状态。
         const respondHotkey = sendResponse || function () {};
         const hotkeyTabId = (sender.tab && sender.tab.id) || message.tabId;
+        // 快捷键从 content 页面发出：按标签页 URL 识别站点（生成文件名前缀等）
+        const hotkeySite = detectSiteFromUrl(sender.tab && sender.tab.url);
+        if (hotkeySite) activeSiteId = hotkeySite;
         hydration
           .catch(() => {})
           .then(() => {

@@ -1,7 +1,7 @@
 /**
  * popup/settings.js —— 弹窗内的「设置」模态框（当前负责「录制快捷键」配置）
  *
- * 【为什么模态框在弹窗里，而不是在 YouTube 页面里】
+ * 【为什么模态框在弹窗里，而不是在视频页面里】
  * tabCapture 捕获的是整个标签页的合成画面，任何注入页面的浮层都会被合成进捕获帧、
  * 出现在最终视频里。popup 是扩展自己的页面，不属于被捕获标签页的渲染内容，
  * 因此设置界面与快捷键配置都不会污染录制画面。
@@ -13,7 +13,7 @@
  *
  * 【改了快捷键如何生效】
  * 配置写入 chrome.storage.sync → content/hotkey.js 监听 storage.onChanged
- * 即时生效，无需刷新 YouTube 页面。
+ * 即时生效，无需刷新视频页面。
  */
 (() => {
   'use strict';
@@ -143,7 +143,7 @@
     }
   }
 
-  /** 关掉「置顶状态窗」时通知 YouTube 页面：立即关闭已打开的小窗 */
+  /** 关掉「置顶状态窗」时通知视频页面：立即关闭已打开的小窗 */
   function notifyPipCfg(enabled) {
     try {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -317,7 +317,7 @@
       make(
         'p',
         'yr-set-tip',
-        '在 YouTube 播放页按下该键：空闲时开始录制，录制中停止并保存到下载目录。快捷键仅在 YouTube 页面获得焦点时生效，在搜索框 / 评论框等输入区域不会触发。'
+        '在 YouTube / Bilibili（B 站）/ Dailymotion / Vimeo / Instagram / Facebook / TikTok 视频播放页按下该键：空闲时开始录制，录制中停止并保存到下载目录。快捷键仅在上述视频页面获得焦点时生效，在搜索框 / 评论框等输入区域不会触发。'
       )
     );
 

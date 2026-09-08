@@ -51,10 +51,12 @@
   /** 画面微调（裁剪框偏移）在 storage.sync 中的键 */
   const OFFSET_KEYS = ['yrOffsetX', 'yrOffsetY'];
 
-  /** 当前 YouTube 标签页 id */
+  /** 当前标签页 id */
   let tabId = null;
-  /** content script 是否就绪（能 ping 通 = 已注入且确为 YouTube 页） */
+  /** content script 是否就绪（能 ping 通 = 已注入且确为受支持的视频页） */
   let tabReady = false;
+  /** 当前站点 id（'youtube' / 'bilibili' / 'dailymotion' / 'vimeo' / 'instagram' / 'facebook' / 'tiktok'，由页面 content 的 YR_PING 回执上报） */
+  let siteId = '';
   /** background 侧状态 */
   let state = {
     phase: 'idle',
@@ -205,7 +207,7 @@
           : '') +
         '点「停止并保存」。';
     } else if (!tabReady) {
-      els.tip.textContent = '请打开一个 YouTube 视频播放页（首次打开需刷新一次页面），再点击「开始录制」。';
+      els.tip.textContent = '请打开 YouTube、Bilibili（B 站）、Dailymotion、Vimeo、Instagram、Facebook 或 TikTok 的视频播放页（首次打开需刷新一次页面），再点击「开始录制」。';
     } else {
       els.tip.textContent =
         '录制播放器区域画面与音频，' +
@@ -266,7 +268,7 @@
 
   // ===================== 录制快捷键 / 设置模态框 =====================
   //
-  // 快捷键在 YouTube 页面内生效（content/hotkey.js），配置存在 storage.sync：
+  // 快捷键在视频播放页内生效（content/hotkey.js），配置存在 storage.sync：
   // 改完即时生效，无需刷新页面。模态框与主界面的文案共用同一份配置。
 
   function renderHotkeyHint() {
@@ -332,6 +334,7 @@
     tabId = tab.id;
     const ping = await sendToTab(tabId, { type: 'YR_PING' }, 1200);
     tabReady = !!(ping && ping.ok);
+    if (ping && ping.site) siteId = ping.site; // content 回执带上当前站点（youtube / bilibili / dailymotion / vimeo / instagram / facebook / tiktok）
   }
 
   // ===================== 用户操作 =====================
@@ -355,7 +358,7 @@
     render();
     // 兜底超时：极端情况下（SW 被回收等）也要把按钮还给用户可以重试
     const resp = await Promise.race([
-      send({ type: 'YR_START', tabId }),
+      send({ type: 'YR_START', tabId, site: siteId }),
       new Promise((resolve) => window.setTimeout(() => resolve(null), 15000)),
     ]);
     await refreshState();
@@ -374,11 +377,17 @@
       // 超时且状态仍停在准备中：给出明确错误，避免界面卡在「准备中」
       if ((state.phase || 'idle') === 'capturing') {
         showReset = true;
-        state.error = { title: '无法开始录制', message: '启动请求超时，请刷新 YouTube 页面后重试。' };
+        state.error = { title: '无法开始录制', message: '启动请求超时，请刷新页面后重试。' };
         state.phase = 'error';
       }
     }
     render();
+    // 「开始录制」已被 background 受理（倒计时启动 / 立即捕获均返回 ok:true）→ 自动关闭主界面，
+    // 把页面让出来：倒计时卡片与录制锁定遮罩都在页面上，弹窗继续留着只会遮挡准备动作
+    // （与「框选录制」点击后关闭弹窗的交互一致）。
+    // 注：YR_START 消息在 await 之前已同步发出，关闭后启动握手继续由 background / 离屏完成，
+    // popup 可随时重新打开查看与停止；失败 / 残留占用 / 超时场景则保留弹窗就地提示。
+    if (resp && resp.ok === true) window.close();
   }
 
   async function doStop() {

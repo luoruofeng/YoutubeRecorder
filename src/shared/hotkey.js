@@ -3,13 +3,14 @@
  *
  * 【为什么单独成文件】
  * 同一份快捷键配置要被三处消费：弹窗设置模态框（读取 / 写入 / 展示）、content 脚本
- * （在 YouTube 页面内监听按键）、以及弹窗主界面的提示文案。三处必须共用同一套
- * 规范化与匹配规则，否则会出现「设置里显示 Alt+R、页面里却只认 R」这类不一致。
+ * （在视频播放页内监听按键，站点为 YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）、以及弹窗主
+ * 界面的提示文案。三处必须共用同一套规范化与匹配规则，否则会出现「设置里显示
+ * Alt+R、页面里却只认 R」这类不一致。
  *
  * 【为什么是页面级快捷键，而不是 chrome.commands】
  * chrome.commands 是全局快捷键，但 Chrome 强制要求组合键必须包含 Ctrl / Alt
  * （macOS 为 Command），无法定义「单键 R」这类纯字母快捷键；而本扩展的录制目标
- * 永远是「当前这个 YouTube 标签页」，页面级快捷键既能支持单键、又天然只在该页
+ * 永远是「当前这个视频播放标签页」，页面级快捷键既能支持单键、又天然只在该页
  * 生效，不会误伤其它标签页，也能在设置里自由修改。
  *
  * 【存储格式】
@@ -93,8 +94,8 @@
     [{ key: 'l', meta: true }, '浏览器地址栏'],
   ];
 
-  /** YouTube 播放器自带快捷键：覆盖后播放器将不再响应该键 */
-  const YOUTUBE_SHORTCUTS = {
+  /** 站点播放器自带快捷键（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 等视频播放器常用）：覆盖后播放器将不再响应该键 */
+  const PLAYER_SHORTCUTS = {
     k: '播放 / 暂停',
     j: '快退 10 秒',
     l: '快进 10 秒',
@@ -238,13 +239,13 @@
       }
     }
     const plain = !combo.ctrl && !combo.alt && !combo.meta;
-    if (plain && YOUTUBE_SHORTCUTS[combo.key]) {
+    if (plain && PLAYER_SHORTCUTS[combo.key]) {
       return (
         '单键 ' +
         keyLabel(combo.key) +
-        ' 是 YouTube 播放器快捷键（' +
-        YOUTUBE_SHORTCUTS[combo.key] +
-        '），设置后播放器将不再响应该键。'
+        ' 是视频播放器快捷键（' +
+        PLAYER_SHORTCUTS[combo.key] +
+        '，YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 等），设置后播放器将不再响应该键。'
       );
     }
     return '';

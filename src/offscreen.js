@@ -73,6 +73,7 @@
     playerRect: null, // content 上报的播放器 CSS 矩形（12.x）
     viewport: null, // content 上报的视口基准（CSS 尺寸 / DPR / 可视视口偏移）
     dpr: 1,
+    siteId: null, // 录制站点 id（'youtube' / 'bilibili' / 'dailymotion' / 'vimeo' / 'instagram' / 'facebook' / 'tiktok'，由 background 在 REC_START 中带入，用于输出文件名）
     cropOffsetX: 0, // 画面微调：水平（CSS 像素，正 = 向右）
     cropOffsetY: 0, // 画面微调：垂直（CSS 像素，正 = 向下）
     mappingLogged: false, // 裁剪映射诊断日志（每次会话只输出一次）
@@ -125,7 +126,7 @@
         // 由 background 转发，或 content 轮询幂等重发；本质上仍是用户点击触发（18.7）
         if (S.phase === 'idle') {
           dlog('REC_START 到达，phase=idle → begin()');
-          begin(message.streamId); // 首段为同步逻辑（置 preparing 并广播 capturing），可安全同步回执
+          begin(message.streamId, message.site); // 首段为同步逻辑（置 preparing 并广播 capturing），可安全同步回执
           try {
             sendResponse({ ok: true, phase: 'capturing' });
           } catch (err) {
@@ -235,7 +236,7 @@
       if (yrPendingStart && yrPendingStart.streamId && S.phase === 'idle') {
         dlog('检测到 storage.session 中的启动意图 → 自行 begin(streamId)');
         await chrome.storage.session.remove('yrPendingStart');
-        begin(yrPendingStart.streamId);
+        begin(yrPendingStart.streamId, yrPendingStart.site);
       } else {
         dlog('storage.session 无启动意图（或已非 idle），跳过自查');
       }
@@ -252,7 +253,7 @@
             } catch (err) {
               /* ignore */
             }
-            begin(change.newValue.streamId);
+            begin(change.newValue.streamId, change.newValue.site);
           }
         });
       }
@@ -279,7 +280,7 @@
     }
   }
 
-  async function begin(streamId) {
+  async function begin(streamId, siteId) {
     S.phase = 'preparing';
     S.finalized = false;
     S.pipelineStarted = false;
@@ -287,6 +288,7 @@
     S.playerRect = null;
     S.viewport = null;
     S.dpr = 1;
+    S.siteId = siteId || null;
     S.mappingLogged = false;
     S.canvasDriftLogged = false;
     S.partialViewWarned = false;
@@ -337,7 +339,7 @@
     }
     if (!stream || !stream.getVideoTracks().length) {
       dlog('tabCapture 返回空流/无视频轨');
-      failModal('无法捕获标签页', '浏览器未返回标签页媒体流。\n请确认：\n· 当前页面为 YouTube 播放页\n· 未开启「受保护内容」屏蔽\n· 未在使用浏览器自带的标签页共享功能');
+      failModal('无法捕获标签页', '浏览器未返回标签页媒体流。\n请确认：\n· 当前页面为受支持的视频播放页（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）\n· 未开启「受保护内容」屏蔽\n· 未在使用浏览器自带的标签页共享功能');
       return;
     }
     dlog('tabCapture 成功（音频轨：' + (stream.getAudioTracks().length ? '有' : '无') + '）');
@@ -444,7 +446,7 @@
         message =
           '未能定位到可见的播放器画面。\n' +
           '请确认：\n' +
-          '· 当前确为 YouTube 视频播放页（非首页 / 搜索 / Shorts）\n' +
+          '· 当前确为 YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 的视频播放页（非首页 / 搜索 / 其它页面）\n' +
           '· 播放器完整显示在窗口内（未滚动出屏幕、未最小化窗口、非迷你播放器 / 小窗模式）\n' +
           '· 视频已正常开始播放（非黑屏、非「无法播放」错误页）\n' +
           '· 录制期间标签页保持在前台\n' +
@@ -1012,14 +1014,28 @@
     downloadBlob(blob);
   }
 
+  /** 站点 id → 输出文件名前缀（与 shared/sites.js 的 filePrefix 保持一致） */
+  const SITE_FILE_PREFIX = {
+    youtube: 'YouTube',
+    bilibili: 'Bilibili',
+    dailymotion: 'Dailymotion',
+    vimeo: 'Vimeo',
+    instagram: 'Instagram',
+    facebook: 'Facebook',
+    tiktok: 'TikTok',
+  };
+
   function buildDownloadFilename() {
     const stamp = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     // 按实际选中的输出格式决定扩展名：原生 mp4 输出 .mp4，回退则保持 .webm
     const mime = S.outputMime || (S.recorder && S.recorder.mimeType) || '';
     const ext = /video\/mp4/i.test(mime) ? '.mp4' : '.webm';
+    // 文件名前缀随录制站点变化：YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok；未知站点用通用「Video」兜底
+    const sitePrefix = SITE_FILE_PREFIX[S.siteId] || 'Video';
     return (
-      'YouTube-' +
+      sitePrefix +
+      '-' +
       stamp.getFullYear() +
       pad(stamp.getMonth() + 1) +
       pad(stamp.getDate()) +

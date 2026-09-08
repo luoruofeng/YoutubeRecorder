@@ -7,7 +7,7 @@ YouTube Recorder 扩展静态自检（任务 20 的自动化部分）。
 
 检查项：
   1. manifest.json 为合法 MV3，必需文件全部存在（含图标 / popup / offscreen / content）。
-  2. content_scripts 仅匹配 YouTube 域名，且 ui.js 先于 content.js 注入。
+  2. content_scripts 仅匹配支持的站点域名（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）。
   3. 权限最小集：tabCapture + downloads + activeTab + offscreen。
   4. 零第三方依赖：HTML 不引用 http(s) 外部资源；无 npm 工程文件。
   5. 全部 JS 通过 node --check 语法校验。
@@ -63,34 +63,48 @@ check(
     "声明 name/version/description",
 )
 
-print("== 2. content_scripts 限定 YouTube ==")
+print("== 2. content_scripts 限定支持站点（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok） ==")
 check(bool(cs), "存在 content_scripts 配置")
 if cs:
     matches = cs.get("matches", [])
     check(
-        bool(matches) and all(("youtube.com" in m) for m in matches),
-        "matches 仅限 youtube.com",
+        bool(matches)
+        and all(
+            (
+                "youtube.com" in m
+                or "bilibili.com" in m
+                or "dailymotion.com" in m
+                or "vimeo.com" in m
+                or "instagram.com" in m
+                or "facebook.com" in m
+                or "tiktok.com" in m
+            )
+            for m in matches
+        ),
+        "matches 仅限 youtube.com / bilibili.com / dailymotion.com / vimeo.com / instagram.com / facebook.com / tiktok.com",
         str(matches),
     )
     js = cs.get("js", [])
     # 页面内脚本顺序：
     # shared/hotkey.js（快捷键定义，弹窗共用）→ shared/indicator.js（全屏录制状态
-    # 指示三开关，阶段十）→ content/guard.js（录制期锁定遮罩 + 全屏黑边红框）→
-    # content/pip.js（Document PiP 全屏置顶状态窗，阶段十）→ content/selector.js
-    # （框选录制选择器，仅用户点击「框选录制」时启用）→ content/content.js（数据上报，
-    # 自身零 DOM）→ content/hotkey.js（页面级快捷键监听）
+    # 指示三开关，阶段十）→ shared/sites.js（站点识别与各站点播放器选择器）→ content/guard.js（录制期锁定遮罩 + 全屏黑边红框）→ content/pip.js
+    # （Document PiP 全屏置顶状态窗，阶段十）→ content/selector.js（框选录制选择器，
+    # 仅用户点击「框选录制」时启用）→ content/countdown.js（开始前倒计时浮层，阶段十一）
+    # → content/content.js（数据上报，自身零 DOM）→ content/hotkey.js（页面级快捷键监听）
     check(
         js
         == [
             "shared/hotkey.js",
             "shared/indicator.js",
+            "shared/sites.js",
             "content/guard.js",
             "content/pip.js",
             "content/selector.js",
+            "content/countdown.js",
             "content/content.js",
             "content/hotkey.js",
         ],
-        "注入顺序：hotkey → indicator → guard → pip → selector → content → content/hotkey",
+        "注入顺序：hotkey → indicator → sites → guard → pip → selector → countdown → content → content/hotkey",
         str(js),
     )
     check(cs.get("run_at") in ("document_idle", "document_start", "document_end"), "run_at 合理", str(cs.get("run_at")))

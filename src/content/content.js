@@ -21,15 +21,20 @@
  * 2. 响应离屏主动拉取矩形（PLAYER_RECT_REQUEST），用于心跳中断自愈；
  * 3. 页面隐藏 / 跳转时通知离屏，避免录制中断丢数据；
  * 4. 响应 popup 的就绪探测（YR_PING）；
- * 5. 随录制会话开关「页面交互锁定遮罩」（YR_RECT_ON / YR_RECT_OFF）。
+ * 5. 随录制会话开关「页面交互锁定遮罩」（YR_RECT_ON / YR_RECT_OFF）；
+ * 6. 会话期间挂载 beforeunload：浏览器层发起的离开（点书签 / 地址栏跳转 /
+ *    刷新 / 关闭标签页）页面内拦不住，只有它能先弹确认框，防止误离开丢录制。
  *
- * 受 background 通过 YR_RECT_ON / YR_RECT_OFF 控制心跳开关，空闲时零开销。
+ * 受 background 通过 YR_RECT_ON / YR_RECT_OFF 控制心跳与离开确认开关，空闲时零开销。
  */
 (() => {
   'use strict';
 
   /** 是否需要上报播放器矩形（由 background 在录制会话开始 / 结束时切换） */
   let captureActive = false;
+
+  /** 录制期间挂载的 beforeunload「离开确认」监听是否已注册（防重复 add / remove） */
+  let leaveGuardBound = false;
 
   /** 用户自定义选区（框选录制模式下有效） */
   let customRect = null;
@@ -46,26 +51,45 @@
   /** 心跳间隔（ms）：持续重取，天然覆盖滚动 / 缩放 / 全屏 / SPA 切视频等布局变化 */
   const RECT_INTERVAL_MS = 120;
 
+  /** 站点识别库（shared/sites.js）：提供各站点（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok）的播放器候选列表 */
+  const YRSITE_LIB = window.YRSites || null;
+
   /**
    * 播放器候选定位器：按优先级依次探测。
-   * YouTube 新旧布局 / 剧场模式 / 迷你播放器等变体较多，多写几个候选
-   * 仅在未命中时才多做一次 querySelector，代价可忽略；命中即返回首个
-   * 真实可见（尺寸 ≥ 4px）的元素矩形。
+   * 候选列表由 shared/sites.js 统一维护（YouTube / Bilibili / Dailymotion / Vimeo / Instagram /
+   * Facebook / TikTok 各自的新旧布局 / 容器选择器 + 通用兜底），命中即返回首个真实可见（尺寸 ≥ 4px）的元素矩形。
+   * 站点间选择器天然互不命中，只在 shared/sites.js 缺失时退回下方仅含 YouTube 的兜底。
    */
-  const PLAYER_SELECTORS = [
-    'video.html5-main-video', // 新布局：主视频元素
-    '#movie_player video', // 播放器容器内 video
-    '.html5-video-container video', // 旧布局容器
-    '.video-stream.html5-main-video', // video class 兜底
-    '#movie_player', // 新版播放器容器
-    '#c4-player', // 旧版剧场模式容器
-    '#player',
-    '#player-container',
-    '#player-container-outer',
-    'ytd-watch-flexy #player',
-    'ytd-player',
-    '#ytd-player',
-  ];
+  const PLAYER_SELECTORS =
+    YRSITE_LIB && Array.isArray(YRSITE_LIB.PLAYER_SELECTORS) && YRSITE_LIB.PLAYER_SELECTORS.length
+      ? YRSITE_LIB.PLAYER_SELECTORS
+      : [
+          'video.html5-main-video', // 新布局：主视频元素
+          '#movie_player video', // 播放器容器内 video
+          '.html5-video-container video', // 旧布局容器
+          '.video-stream.html5-main-video', // video class 兜底
+          '#movie_player', // 新版播放器容器
+          '#c4-player', // 旧版剧场模式容器
+          '#player',
+          '#player-container',
+          '#player-container-outer',
+          'ytd-watch-flexy #player',
+          'ytd-player',
+          '#ytd-player',
+        ];
+
+  /**
+   * 容器级兜底候选（仅当 PLAYER_SELECTORS 全部 miss 时尝试）：
+   * 命中元素不要求内部包含 <video>，直接使用容器矩形作为录制区矩形。
+   * 主要服务 Dailymotion 与 Vimeo：两者通常把真实 <video> 渲染进主文档（可被上面
+   * 的 video 候选命中）；但个别页面 / 改版后 <video> 可能在跨域 iframe 或 shadow DOM
+   * 里（content script 受同源策略读不到），此时退而取主文档中矩形一致的播放器外壳
+   * （Dailymotion：#player-wrapper / Player__player / TopPlayer__placeholder 等；
+   * Vimeo：.vp-player-layout / .vp-player / .vp-video 等）作为录制区；
+   * 其他站点容器往往内嵌其它 UI，不纳入此列表。
+   */
+  const PLAYER_CONTAINER_SELECTORS =
+    YRSITE_LIB && Array.isArray(YRSITE_LIB.CONTAINER_SELECTORS) ? YRSITE_LIB.CONTAINER_SELECTORS : [];
 
   /** 诊断日志（仅写控制台，页面内无 UI 可展示） */
   function dlog(text) {
@@ -168,6 +192,61 @@
     };
   }
 
+  /** 递归收集某根节点（含其 open shadow root 子树）内全部 <video>；异常时只返回普通层 */
+  function collectVideos(root, out) {
+    const list = out || [];
+    try {
+      const own = root.querySelectorAll('video');
+      for (const v of own) list.push(v);
+      // 部分播放器把 <video> 封装进自定义元素 / open shadow root（如 DM neon player、
+      // 各种 Web Component 播放器），querySelectorAll 默认不进 shadow 内部，这里补扫
+      const hosts = root.querySelectorAll('*');
+      for (const host of hosts) {
+        const sr = host.shadowRoot; // open shadow root 才能读
+        if (sr) collectVideos(sr, list);
+      }
+    } catch (err) {
+      /* 个别节点异常不阻断 */
+    }
+    return list;
+  }
+
+  /**
+   * 扫描页面上所有 <video>（含 open shadow root 内），返回可见面积最大的那个
+   * （用于裸 `video` 通用兜底）。
+   * 要求：真实可见（尺寸 ≥ 4px）且已解码出片源（videoWidth/Height > 0，避免把
+   * 加载中 / 空壳的 video 当候选）。主播放器通常占页面最大矩形，因此该启发式在
+   * YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 等有多个 video 的页面上都能命中正在播放的主视频。
+   * 找不到可见 video 时返回 null（调用方继续探测其它候选）。
+   */
+  function largestVisibleVideo() {
+    let videos = [];
+    try {
+      videos = collectVideos(document, []);
+    } catch (err) {
+      videos = [];
+    }
+    let best = null;
+    let bestArea = 0;
+    for (const v of videos) {
+      // 片源未就绪的 video 一律跳过：paintedRect 会返回 null，选中了也没用
+      if (!v.videoWidth || !v.videoHeight) continue;
+      let r = null;
+      try {
+        r = v.getBoundingClientRect();
+      } catch (err) {
+        continue;
+      }
+      if (!r || r.width < 4 || r.height < 4) continue;
+      const area = r.width * r.height;
+      if (area > bestArea) {
+        bestArea = area;
+        best = v;
+      }
+    }
+    return best;
+  }
+
   /** 读取真实播放器可视区域相对视口的矩形（附带命中的选择器，便于诊断定位是否量错了元素） */
   function readPlayerRect() {
     if (customRect) {
@@ -184,10 +263,19 @@
     }
     for (const selector of PLAYER_SELECTORS) {
       let el = null;
-      try {
-        el = document.querySelector(selector);
-      } catch (err) {
-        continue; // 个别选择器异常不阻断后续候选
+      // 裸 `video` 通用兜底：页面上可能存在多个 <video>（推荐位小窗 / 迷你播放器 /
+      // 广告等），document.querySelector 会命中 DOM 顺序的第一个，可能是小窗而非主
+      // 播放器。因此对裸 `video` 做特判 —— 扫描全部 video，取可见面积最大的那个
+      // （主播放器通常占页面最大区域）。该分支对所有站点生效，仅在前置站点选择器
+      // 全部 miss 时兜底，命中成本与 querySelector 相同量级。
+      if (selector === 'video') {
+        el = largestVisibleVideo();
+      } else {
+        try {
+          el = document.querySelector(selector);
+        } catch (err) {
+          continue; // 个别选择器异常不阻断后续候选
+        }
       }
       if (!el) continue;
       // 收紧：录制区域的矩形来源必须是一个 <video> 元素。命中容器（如
@@ -231,6 +319,57 @@
         srcW: target.videoWidth || 0, // 片源原始像素尺寸（诊断用）
         srcH: target.videoHeight || 0,
         via: selector,
+      };
+    }
+    // ============= 容器级候选兜底 =============
+    // PLAYER_SELECTORS 全部 miss 时尝试（主要服务 Dailymotion 与 Vimeo：真实 <video>
+    // 在跨域 iframe / shadow DOM，主文档读不到；用外壳容器矩形作为录制区）。
+    // 其他站点不在此列表里。
+    for (const selector of PLAYER_CONTAINER_SELECTORS) {
+      let el = null;
+      try {
+        el = document.querySelector(selector);
+      } catch (err) {
+        continue;
+      }
+      if (!el) continue;
+      // 容器内若有 <video> 仍优先使用（比容器矩形更准；paintedRect 会按 object-fit 换算）
+      let target = el;
+      if (target.tagName !== 'VIDEO') {
+        let inner = null;
+        try {
+          inner = target.querySelector('video');
+        } catch (err) {
+          inner = null;
+        }
+        if (inner && inner.tagName === 'VIDEO') target = inner;
+      }
+      const rect = target.getBoundingClientRect();
+      // 真实可见尺寸才纳入（与 PLAYER_SELECTORS 同标准）
+      if (rect.width < 4 || rect.height < 4) continue;
+      const painted = paintedRect(target, rect); // 非 VIDEO 直接返回 plain
+      if (!painted || painted.width < 4 || painted.height < 4) continue;
+      const clipped = clipToViewport(painted);
+      if (clipped.width < 4 || clipped.height < 4) continue;
+      let fit = '';
+      try {
+        fit = window.getComputedStyle(target).objectFit || '';
+      } catch (err) {
+        fit = '';
+      }
+      return {
+        x: clipped.x,
+        y: clipped.y,
+        width: clipped.width,
+        height: clipped.height,
+        visible: clipped.visible,
+        fullWidth: clipped.fullWidth,
+        fullHeight: clipped.fullHeight,
+        box: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        fit,
+        srcW: target.videoWidth || 0,
+        srcH: target.videoHeight || 0,
+        via: selector + '@container',
       };
     }
     return null;
@@ -327,15 +466,56 @@
     }
   }
 
+  // ===================== 录制期「离开确认」（beforeunload） =====================
+  //
+  // guard.js 的遮罩只拦得住「页面内」的点击 / 滚动 / 键盘：用户从浏览器层离开
+  // （地址栏输入新网址、点击书签、刷新、关闭标签页）完全不经过页面 DOM，页面内
+  // 任何遮罩都拦不住 —— 这是录制数据被误丢弃的最后一种路径。
+  //
+  // 唯一能让浏览器先弹确认框的标准手段是 beforeunload：会话期间注册后，任何会
+  // 卸载当前页面的导航都会先出现浏览器原生确认框（含「留下」选项），用户取消即
+  // 留在页面继续录制。
+  //
+  // 限制：出于反滥用考虑，现代浏览器（Chrome / Firefox / Safari）一律忽略开发者
+  // 设置的自定义文案，只显示各自的系统通用提示（Chrome 通常为「离开网站？」并带
+  // 「取消」按钮）。因此这里不（也无法）自定义「正在录制」的文案；录制期遮罩提示
+  // （guard.js 的 TIP_DETAIL）已提前告知用户该行为。
+  function onLeaveConfirm(event) {
+    // 同步调用 preventDefault 并写 returnValue 是触发浏览器确认框的规范做法；
+    // returnValue 的字符串在现代浏览器中会被忽略，仅为兼容仍读取它的旧内核。
+    event.preventDefault();
+    try {
+      event.returnValue = '';
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /** 录制会话开始 / 结束：随会话挂载 / 移除 beforeunload 离开确认 */
+  function setLeaveGuard(on) {
+    if (!!on === leaveGuardBound) return;
+    leaveGuardBound = !!on;
+    try {
+      if (leaveGuardBound) window.addEventListener('beforeunload', onLeaveConfirm);
+      else window.removeEventListener('beforeunload', onLeaveConfirm);
+    } catch (err) {
+      /* 页面环境异常：离开确认降级（不影响录制主流程） */
+    }
+  }
+
   // ===================== 消息接收 =====================
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== 'string') return;
     switch (message.type) {
-      case 'YR_PING':
-        // popup 就绪探测：能收到即说明本页已注入脚本（配合 manifest 的域名限定 = YouTube 页）
-        sendResponse({ ok: true, hasPlayer: !!readPlayerRect() });
+      case 'YR_PING': {
+        // popup 就绪探测：能收到即说明本页已注入脚本（配合 manifest 的域名限定 =
+        // YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 播放页）；site 供 popup 展示站点与 background 生成文件名
+        const currentSite =
+          YRSITE_LIB && typeof YRSITE_LIB.detectCurrent === 'function' ? YRSITE_LIB.detectCurrent() : null;
+        sendResponse({ ok: true, hasPlayer: !!readPlayerRect(), site: currentSite ? currentSite.id : '' });
         break;
+      }
       case 'YR_SELECT_REGION':
         if (window.YRSelector) {
           window.YRSelector.start();
@@ -344,6 +524,7 @@
         break;
       case 'YR_RECT_ON': {
         captureActive = true;
+        setLeaveGuard(true); // 会话开始：离开页面（书签 / 刷新 / 关标签页）前先弹浏览器确认框
         const g = guardApi();
         if (g && !customRect) g.enable(); // 录制会话开始：锁定页面交互（仅在非自定义选区模式下启用原生遮罩）
         startRectReporter(); // 首次心跳会立刻把播放器矩形交给遮罩完成布局
@@ -353,6 +534,7 @@
       case 'YR_RECT_OFF': {
         captureActive = false;
         stopRectReporter();
+        setLeaveGuard(false); // 会话结束（完成 / 失败 / 复位）：解除离开确认，页面恢复可自由导航
         const g = guardApi();
         if (g) g.disable(); // 会话结束（完成 / 失败 / 复位）：移除遮罩并解绑监听
         sendResponse({ ok: true });

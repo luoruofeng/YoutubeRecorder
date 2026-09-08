@@ -3,8 +3,9 @@
  *
  * 【为什么放页面里而不是用 chrome.commands】
  * chrome.commands 的全局组合键被 Chrome 强制要求带 Ctrl / Alt（macOS 为 Command），
- * 无法定义用户想要的「单键 R」。而本扩展的录制目标固定是当前 YouTube 标签页，
- * 在页面内监听既支持单键，又天然只在该页生效，不会误伤其它标签页。
+ * 无法定义用户想要的「单键 R」。而本扩展的录制目标固定是当前视频播放标签页
+ * （YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok），在页面内监听既支持单键，又天然只在该页
+ * 生效，不会误伤其它标签页。
  *
  * 【为什么不自己判断「该开始还是该停止」】
  * 录制状态的唯一权威在 background（popup 可以随时开关，页面不该缓存状态）。
@@ -12,8 +13,9 @@
  * 避免状态不一致时按错方向。
  *
  * 【为什么必须是捕获阶段且尽早注册】
- * 1. YouTube 自己在 document 上绑了大量快捷键，捕获阶段可以先拦下来（命中后
- *    preventDefault + stopPropagation，播放器不会再响应同一按键）；
+ * 1. 视频站点（YouTube / Bilibili / Dailymotion / Vimeo / Instagram / Facebook / TikTok 等）在 document 上绑了大量快捷键，
+ *    捕获阶段可以先拦下来（命中后 preventDefault + stopPropagation，
+ *    播放器不会再响应同一按键）；
  * 2. 录制期的锁定遮罩（guard.js）也会在捕获阶段拦键，本文件先注册，
  *    因此快捷键的优先级高于遮罩拦截，录制中一定能按到「停止并保存」。
  *
