@@ -168,8 +168,14 @@
         if (S.pendingDownload && message.downloadId === S.pendingDownload.downloadId) {
           if (message.ok) {
             dlog('收到下载完成通知 (id=' + message.downloadId + ')');
+            const blob = S.pendingDownload.blob;
+            const filename = S.pendingDownload.filename;
+            const mime = (blob && blob.type) || S.outputMime || '';
             clearPendingDownload();
+            // 先立即复位离屏（idle），保证用户紧接着开始的下一次录制不被本次异步暂存推迟；
+            // 再异步把「刚保存的视频」写入 OPFS（背景 5s 后才回收离屏，足够完成写入）。
             broadcastIdle();
+            finishSavedRecording(blob, filename, mime);
           } else {
             const errName = message.message || '未知';
             const blob = S.pendingDownload.blob;
@@ -1061,6 +1067,38 @@
   function clearPendingDownload() {
     revokePendingDownloadUrl();
     S.pendingDownload = null;
+  }
+
+  /**
+   * 下载成功收尾（阶段十二「保存后裁剪」的数据交接）：
+   * 把刚保存的视频写入 OPFS（见 shared/pending-video.js），完成后向 background 广播
+   * YR_EDITOR_PERSISTED —— background 据此弹出「是否需要裁剪」询问窗口；
+   * 写入失败（如环境不支持 OPFS / 磁盘配额不足）则静默结束，不打扰用户。
+   * 注意：离屏已在调用方先复位为 idle，本函数不再触发广播 idle。
+   */
+  async function finishSavedRecording(blob, filename, mime) {
+    let persisted = false;
+    if (blob && blob.size && window.YRPendingVideo) {
+      try {
+        persisted = await window.YRPendingVideo.save(blob, {
+          filename: filename || '',
+          mime: mime || '',
+        });
+        dlog('待裁剪视频已暂存 OPFS（persisted=' + persisted + '）');
+      } catch (err) {
+        persisted = false;
+        dlog('待裁剪视频暂存失败：' + String((err && err.message) || err));
+      }
+    }
+    try {
+      chrome.runtime.sendMessage({
+        type: 'YR_EDITOR_PERSISTED',
+        ok: !!persisted,
+        filename: persisted ? filename || '' : '',
+      });
+    } catch (err) {
+      /* 广播失败不影响主流程 */
+    }
   }
 
   function shouldRetryInterruptedDownload(errName, attempt) {

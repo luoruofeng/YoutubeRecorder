@@ -1,0 +1,482 @@
+/* editor.css —— 视频时间裁剪编辑器样式（阶段十二）
+ * 布局参考 iOS 照片「视频裁剪」：上方视频画面 → 播放控制行 → 缩略胶片 + 左右把手时间条
+ * → 区间信息行 → 底部操作（取消 / 保存并替换）。
+ */
+:root {
+  color-scheme: light dark;
+  --ed-bg: #f6f6f8;
+  --ed-surface: #ffffff;
+  --ed-border: rgba(0, 0, 0, 0.12);
+  --ed-text: #1c1c1e;
+  --ed-text-sub: #6e6e73;
+  --ed-primary: #1a73e8;
+  --ed-primary-hover: #1765cc;
+  --ed-accent: #ffd60a; /* iOS 裁剪把手黄 */
+  --ed-danger: #e62117;
+  --ed-stage: #000000;
+  --ed-ghost-bg: #f1f3f4;
+  --ed-ghost-text: #3c4043;
+  --ed-ghost-hover: #e4e6e9;
+  --ed-overlay: rgba(0, 0, 0, 0.62);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ed-bg: #1d1d20;
+    --ed-surface: #2a2a2e;
+    --ed-border: rgba(255, 255, 255, 0.16);
+    --ed-text: #f2f2f4;
+    --ed-text-sub: #a9a9b0;
+    --ed-primary: #4285f4;
+    --ed-primary-hover: #5a95f5;
+    --ed-ghost-bg: #3a3a40;
+    --ed-ghost-text: #e8eaed;
+    --ed-ghost-hover: #45454c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  color: var(--ed-text);
+  background: var(--ed-bg);
+}
+
+/* ========== 头部 ========== */
+.ed-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+.ed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.ed-h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.ed-close-hint {
+  font-size: 12px;
+  color: var(--ed-text-sub);
+}
+.ed-file {
+  margin-top: 4px;
+  max-width: 520px;
+  font-size: 12px;
+  color: var(--ed-text-sub);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ========== 主区 ========== */
+.ed-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 22px 12px;
+  overflow: auto;
+}
+
+/* 画面区 */
+.ed-stage {
+  position: relative;
+  flex: 1;
+  min-height: 220px;
+  background: var(--ed-stage);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.ed-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+/* 画面区内的浮层（空态 / 准备中 / 导出中）。
+   注意：这些浮层默认是 hidden（HTML hidden 属性）。上面的 display:flex 属于
+   作者样式，会覆盖 hidden 默认的 display:none，因此必须显式补回 [hidden] 规则，
+   否则三个浮层会从页面打开起就叠显（表现为一直看到「正在裁剪并导出…」）。 */
+.ed-empty[hidden],
+.ed-loading[hidden],
+.ed-export[hidden] {
+  display: none;
+}
+.ed-empty,
+.ed-loading,
+.ed-export {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: #e8eaed;
+  background: rgba(0, 0, 0, 0.82);
+  z-index: 5;
+}
+.ed-empty-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.ed-empty-desc {
+  margin: 0 0 6px;
+  max-width: 420px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c6c9cd;
+}
+.ed-loading-text {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: #c6c9cd;
+}
+.ed-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: ed-rotate 0.8s linear infinite;
+}
+@keyframes ed-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ed-export-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.ed-progress {
+  width: min(360px, 70%);
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.2);
+  overflow: hidden;
+}
+.ed-progress i {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ed-accent);
+  transition: width 0.12s linear;
+}
+.ed-export-meta {
+  margin: 0;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: #c6c9cd;
+}
+
+/* 播放控制行 */
+.ed-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 4px;
+}
+.ed-playbtn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--ed-primary);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.ed-playbtn:hover:not(:disabled) {
+  background: var(--ed-primary-hover);
+}
+.ed-playbtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ed-ico {
+  width: 0;
+  height: 0;
+  display: block;
+}
+.ed-ico-play {
+  border-left: 11px solid #ffffff;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  margin-left: 3px;
+}
+.ed-playbtn.is-playing .ed-ico-play {
+  width: 10px;
+  height: 14px;
+  border: none;
+  margin: 0;
+  border-left: 3.5px solid #ffffff;
+  border-right: 3.5px solid #ffffff;
+}
+.ed-soundbtn {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--ed-border);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ed-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ed-soundbtn:hover {
+  background: var(--ed-ghost-hover);
+}
+.ed-time {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ed-text);
+}
+.ed-sep {
+  color: var(--ed-text-sub);
+}
+.ed-tooltip {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ed-text-sub);
+}
+
+/* 胶片区 */
+.ed-filmwrap {
+  flex: none;
+  padding: 0 2px;
+}
+
+/* 区间信息行 */
+.ed-rangebar {
+  flex: none;
+  display: flex;
+  gap: 26px;
+}
+.ed-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.ed-stat-label {
+  font-size: 12px;
+  color: var(--ed-text-sub);
+}
+.ed-stat-value {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ========== 底部 ========== */
+.ed-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--ed-border);
+  background: var(--ed-surface);
+}
+.ed-status {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ed-text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ed-status.is-ok {
+  color: #188038;
+}
+.ed-status.is-err {
+  color: var(--ed-danger);
+}
+@media (prefers-color-scheme: dark) {
+  .ed-status.is-ok {
+    color: #81c995;
+  }
+}
+.ed-btn {
+  height: 36px;
+  padding: 0 20px;
+  border: none;
+  border-radius: 9px;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ed-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ed-btn-primary {
+  background: var(--ed-primary);
+  color: #ffffff;
+}
+.ed-btn-primary:hover:not(:disabled) {
+  background: var(--ed-primary-hover);
+}
+.ed-btn-ghost {
+  background: var(--ed-ghost-bg);
+  color: var(--ed-ghost-text);
+}
+.ed-btn-ghost:hover:not(:disabled) {
+  background: var(--ed-ghost-hover);
+}
+.ed-save {
+  flex: none;
+  min-width: 168px;
+}
+
+/* ========== 时间裁剪条（TrimBar 内部样式） ========== */
+.yrbar-holder {
+  width: 100%;
+}
+.yrbar {
+  position: relative;
+  height: 76px;
+  border-radius: 12px;
+  background: #101010;
+  overflow: visible; /* 允许两端把手露出（此前 hidden 会把把手裁掉一半） */
+  user-select: none;
+  touch-action: none;
+  cursor: crosshair;
+}
+.yrbar-film,
+.yrbar-dim,
+.yrbar-sel {
+  border-radius: 12px;
+}
+.yrbar-film {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* 选中区间两侧压暗（iOS 效果） */
+.yrbar-dim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.58);
+  pointer-events: none;
+  z-index: 2;
+}
+.yrbar-dim-l {
+  left: 0;
+}
+.yrbar-dim-r {
+  right: 0;
+}
+/* 选中区间高亮 */
+.yrbar-sel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 2px solid var(--ed-accent); /* 强化边界线 */
+  border-top: none;
+  border-bottom: none;
+  box-shadow: inset 0 0 15px rgba(255, 214, 10, 0.2);
+  pointer-events: none;
+  z-index: 2;
+  box-sizing: border-box;
+}
+/* 播放头 */
+.yrbar-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px; /* 稍微加宽，增加命中面积与视觉感 */
+  margin-left: -2px;
+  background: #ffffff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.8), 0 0 20px rgba(66, 133, 244, 0.4); /* 霓虹发光感 */
+  pointer-events: auto; /* 允许交互 */
+  cursor: ew-resize;
+  z-index: 5; /* 确保在最上层 */
+  transition: box-shadow 0.2s ease;
+}
+.yrbar-playhead:hover,
+.yrbar.is-dragging .yrbar-playhead {
+  box-shadow: 0 0 15px rgba(255, 255, 255, 1), 0 0 30px rgba(66, 133, 244, 0.6);
+}
+.yrbar-playhead[hidden] {
+  display: none;
+}
+/* 左右把手（宽度需与 trim-bar.js 的 HANDLE_HIT 命中半径匹配） */
+.yrbar-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 28px; /* 增加宽度，更好抓取 */
+  transform: translateX(-50%);
+  cursor: ew-resize;
+  z-index: 6;
+}
+.yrbar-grip::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 8px;
+  right: 8px;
+  border-radius: 4px;
+  background: var(--ed-accent);
+  box-shadow: 0 0 8px rgba(255, 214, 10, 0.6);
+  transition: all 0.2s ease;
+}
+.yrbar-grip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #000000;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
+}
+.yrbar-grip:hover::before,
+.yrbar.is-dragging .yrbar-grip::before {
+  background: #fff066;
+  box-shadow: 0 0 15px rgba(255, 214, 10, 0.9);
+  left: 6px;
+  right: 6px;
+}

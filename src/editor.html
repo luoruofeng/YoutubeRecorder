@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>视频时间裁剪</title>
+  <link rel="stylesheet" href="editor/editor.css" />
+</head>
+<body>
+  <header class="ed-head">
+    <div class="ed-title">
+      <div class="ed-row">
+        <h1 class="ed-h1">视频时间裁剪</h1>
+        <span class="ed-close-hint">裁剪后会替换刚才保存的 MP4 文件</span>
+      </div>
+      <div class="ed-file" id="file-name" title="">—</div>
+    </div>
+    <button id="btn-close" class="ed-btn ed-btn-ghost" type="button">取消</button>
+  </header>
+
+  <main class="ed-main">
+    <!-- 视频画面区 -->
+    <section class="ed-stage" id="stage">
+      <video id="player" class="ed-video" playsinline preload="metadata"></video>
+
+      <!-- 无待裁剪视频（暂存失败 / 已被处理）时的兜底：允许自行选择本地文件 -->
+      <div class="ed-empty" id="empty" hidden>
+        <p class="ed-empty-title">没有找到可裁剪的视频</p>
+        <p class="ed-empty-desc">它可能已被处理，或本次暂存未生效。也可以选择刚下载到本地的视频文件继续：</p>
+        <button id="btn-pick" class="ed-btn ed-btn-primary" type="button">选择本地视频文件</button>
+        <input id="file-picker" type="file" accept="video/*" hidden />
+      </div>
+
+      <div class="ed-loading" id="loading" hidden>
+        <span class="ed-spinner"></span>
+        <p class="ed-loading-text" id="loading-text">正在准备视频…</p>
+      </div>
+
+      <!-- 裁剪导出进度 -->
+      <div class="ed-export" id="export" hidden>
+        <p class="ed-export-title">正在裁剪并导出…</p>
+        <div class="ed-progress"><i id="export-bar"></i></div>
+        <p class="ed-export-meta" id="export-meta">0%</p>
+      </div>
+    </section>
+
+    <!-- 播放控制行 -->
+    <section class="ed-toolbar">
+      <button id="btn-play" class="ed-playbtn" type="button" title="播放 / 暂停所选区间">
+        <span class="ed-ico ed-ico-play" id="ico-play"></span>
+      </button>
+      <button id="btn-mute" class="ed-soundbtn" type="button">声音：关</button>
+      <span class="ed-time" id="cur-time">00:00</span>
+      <span class="ed-sep">/</span>
+      <span class="ed-time" id="total-time">00:00</span>
+      <span class="ed-tooltip">拖动两端把手选择保留片段；空格 播放/暂停；←/→ 微调播放位置（Shift 大步）</span>
+    </section>
+
+    <!-- iOS 风格时间裁剪条：缩略胶片 + 左右把手 -->
+    <section class="ed-filmwrap">
+      <div id="trim-bar" class="yrbar"></div>
+    </section>
+
+    <section class="ed-rangebar">
+      <div class="ed-stat">
+        <span class="ed-stat-label">保留区间</span>
+        <span class="ed-stat-value" id="range-label">00:00 – 00:00</span>
+      </div>
+      <div class="ed-stat">
+        <span class="ed-stat-label">裁剪后时长</span>
+        <span class="ed-stat-value" id="clip-dur">00:00 / 00:00</span>
+      </div>
+    </section>
+  </main>
+
+  <footer class="ed-foot">
+    <div class="ed-status" id="status" role="status"></div>
+    <button id="btn-save" class="ed-btn ed-btn-primary ed-save" type="button" disabled>保存并替换原文件</button>
+  </footer>
+
+  <script src="shared/pending-video.js"></script>
+  <script src="editor/trim-bar.js"></script>
+  <script src="editor/exporter.js"></script>
+  <script src="editor/editor.js"></script>
+</body>
+</html>

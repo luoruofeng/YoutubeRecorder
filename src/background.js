@@ -43,6 +43,13 @@
   /** 当前录制关联的站点 id（'youtube' / 'bilibili' / 'dailymotion' / 'vimeo' / 'instagram' / 'facebook' / 'tiktok'，由 popup 上报或从标签页 URL 识别） */
   let activeSiteId = null;
 
+  /**
+   * 「保存后裁剪」询问窗口 id（阶段十二）。
+   * 录制保存成功且离屏已把视频暂存 OPFS 后，background 弹出一个询问小窗；
+   * 记录窗口 id 用于去重（重复保存时先关旧窗口再弹新窗口），窗口被用户关闭后清空。
+   */
+  let trimAskWindowId = null;
+
   /** 从标签页 URL 识别站点；识别不到返回 null（文件名等按通用名处理） */
   function detectSiteFromUrl(url) {
     const host = String(url || '').toLowerCase();
@@ -140,6 +147,43 @@
       chrome.notifications.clear(id, () => void chrome.runtime.lastError);
     } catch (err) {
       /* ignore */
+    }
+  }
+
+  // ===================== 保存后裁剪：询问窗口（阶段十二） =====================
+  //
+  // 离屏在视频保存成功且已把视频暂存 OPFS 后广播 YR_EDITOR_PERSISTED{ok:true}，
+  // 本文件据此弹出一个「是否需要裁剪」小窗（ask.html）。窗口内容 / 「是 / 否」
+  // 的后续动作全部由 ask 页面自处理（是 → 打开编辑器 editor.html；否 → 清理暂存），
+  // background 只负责「弹出与去重」，保持低耦合。
+
+  /** 打开（或刷新）「保存后裁剪」询问小窗 */
+  function openTrimAskWindow() {
+    // 重复保存：先关闭旧询问窗，再针对最新一次保存弹新窗（避免同时存在多个）
+    if (trimAskWindowId !== null) {
+      try {
+        chrome.windows.remove(trimAskWindowId);
+      } catch (err) {
+        /* 窗口可能已关闭：忽略 */
+      }
+      trimAskWindowId = null;
+    }
+    try {
+      chrome.windows.create(
+        {
+          url: chrome.runtime.getURL('ask.html'),
+          type: 'popup',
+          width: 480,
+          height: 320,
+          focused: true,
+        },
+        (win) => {
+          if (chrome.runtime.lastError || !win) return;
+          trimAskWindowId = win.id;
+        }
+      );
+    } catch (err) {
+      /* 个别环境 windows API 不可用：本次不弹询问，不影响录制主流程 */
     }
   }
 
@@ -1036,6 +1080,15 @@
         return true;
       }
 
+      case 'YR_EDITOR_PERSISTED': {
+        // 离屏：视频保存成功且已暂存 OPFS → 弹「是否需要裁剪」询问窗口
+        if (message && message.ok) {
+          console.log('[YR-bg] 收到 YR_EDITOR_PERSISTED → 打开裁剪询问窗口');
+          openTrimAskWindow();
+        }
+        break;
+      }
+
       default:
         break;
     }
@@ -1106,6 +1159,15 @@
     });
   } catch (err) {
     /* tabs 事件不可用：兜底定时器仍能收尾 */
+  }
+
+  // 询问窗口被用户关闭（点 X / 完成后关闭）时清空记录，避免残留 id 误伤后续窗口
+  try {
+    chrome.windows.onRemoved.addListener((winId) => {
+      if (winId === trimAskWindowId) trimAskWindowId = null;
+    });
+  } catch (err) {
+    /* windows API 不可用（极少数平台）：忽略 */
   }
 
   // 读取 / 跟随「系统通知」开关（storage.sync yrIndNotif，默认开）

@@ -348,6 +348,47 @@ tabCapture 捕获整个标签页的合成画面，捕获期间任何页面浮层
 
 ---
 
+## 4.8 保存后时间裁剪（阶段十二）
+
+**目标**：视频保存成功后弹出询问框；用户选择「去裁剪」则打开一个新浏览器窗口播放该视频，
+并以下方 iOS 风格的缩略胶片 + 左右把手时间条做**时间区间裁剪**；点「保存」用裁剪结果
+**替换刚才已保存的原文件**（同名覆盖，仅 MP4 环境；回退 WebM 时另存新名）。
+
+**为什么用 OPFS 中转，而不是直接把 Blob 传给新窗口**：Chrome 的消息通道只可靠传递
+JSON 数据（Blob 无法稳定跨上下文传递）；`chrome.downloads` 只能拿到下载元数据、读不回文件内容；
+扩展页面又禁止 `file://`。而 OPFS（Origin Private File System）是扩展自身 origin 的私有
+文件系统，离屏文档 / 询问窗口 / 编辑窗口天然同源共享、无需新增权限、不依赖任何常驻上下文内存。
+
+**新增上下文与职责**（新文件均为扩展自有页面，不注入任何站点）：
+
+| 文件 | 上下文 | 职责 |
+| --- | --- | --- |
+| `shared/pending-video.js` | offscreen / ask / editor 共用 | 「待裁剪视频」OPFS 暂存读写（save/load/clear + session 元信息），唯一的数据交接口 |
+| `ask.html` + `ask.js` | background 弹出的小窗 | 询问是否裁剪：是 → `chrome.windows.create` 打开 `editor.html`；否 → 清理暂存并关闭 |
+| `editor.html` | 编辑窗口 | 播放器 + 控制行 + 时间裁剪条 + 区间信息 + 导出浮层 |
+| `editor/editor.css` | 编辑窗口 | iOS 风格布局（视频上、胶片把手条中、按钮下），明暗两套主题 |
+| `editor/trim-bar.js` | 编辑窗口 | iOS 风格双把手时间条组件（缩略胶片底、区间压暗/高亮、播放头、拖动/预览回调），纯 UI 组件 |
+| `editor/exporter.js` | 编辑窗口 | 时间区间导出内核：隐藏 `<video>` seek 到起点 → canvas 逐帧 drawImage + `MediaElementAudioSourceNode` 取音轨 → `MediaRecorder`（mp4 优先/webm 回退）→ 覆盖保存原文件 |
+| `editor/editor.js` | 编辑窗口 | 装配：读取暂存/选文件 → 生成胶片 → 选区间试听 → 调导出内核 → 替换原文件 |
+
+**消息链路（对既有录制主流程几乎零侵入）**：
+
+```
+录制完成 → offscreen 组装 Blob → background 代理下载
+  → background: downloads.onChanged(complete) → 状态 idle + 成功通知（原逻辑）
+  → offscreen 收到 DOWNLOAD_RESULT{ok} → 先 broadcastIdle（不阻塞下一次录制）
+      再 YRPendingVideo.save(Blob) 写入 OPFS → 广播 YR_EDITOR_PERSISTED{ok}
+  → background 收到 YR_EDITOR_PERSISTED{ok} → chrome.windows.create(ask.html)（重复保存先去重）
+  → ask「去裁剪」→ 打开 editor.html（数据仍在 OPFS，编辑器自行读取并清理）
+  → 编辑器裁剪完成 → chrome.downloads.download({ filename: 原名, conflictAction:'overwrite' })
+```
+
+**技术边界（与阶段一「零第三方依赖」一致）**：时间裁剪 = 浏览器原生「重编码」，
+非容器级无损切割（后者需 mp4box / ffmpeg 之类）；导出耗时接近被选区间实际时长；
+二次编码会带来轻微再压缩损耗。这些限制在编辑器内以提示文案说明。
+
+---
+
 ## 5. 验收方式（任务 20）
 
 1. Chrome 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」选择 `src/`。

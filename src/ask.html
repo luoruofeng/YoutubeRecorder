@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>是否裁剪刚才保存的视频？</title>
+  <style>
+    /* 询问小窗（由 background 在「保存成功」后弹出），独立扩展页，内联样式即可 */
+    :root {
+      color-scheme: light dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 20px 22px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+        'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      font-size: 14px;
+      color: #111111;
+      background: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      body {
+        color: #f1f1f1;
+        background: #212121;
+      }
+    }
+
+    .ask-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 10px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .ask-badge {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 11px;
+      background: #188038;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .ask-desc {
+      margin: 0 0 12px;
+      line-height: 1.7;
+      color: #5f6368;
+    }
+    @media (prefers-color-scheme: dark) {
+      .ask-desc {
+        color: #bdc1c6;
+      }
+    }
+
+    .ask-file {
+      margin: 0 0 18px;
+      padding: 8px 10px;
+      border: 1px solid rgba(0, 0, 0, 0.16);
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.04);
+      font-size: 12px;
+      color: #5f6368;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    @media (prefers-color-scheme: dark) {
+      .ask-file {
+        border-color: rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.05);
+        color: #9aa0a6;
+      }
+    }
+
+    .ask-actions {
+      display: flex;
+      gap: 10px;
+    }
+    .ask-btn {
+      flex: 1;
+      height: 38px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    .ask-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .ask-btn-primary {
+      background: #1a73e8;
+      color: #ffffff;
+    }
+    .ask-btn-primary:hover:not(:disabled) {
+      background: #1765cc;
+    }
+    .ask-btn-ghost {
+      background: #f1f3f4;
+      color: #3c4043;
+    }
+    .ask-btn-ghost:hover:not(:disabled) {
+      background: #e4e6e9;
+    }
+    @media (prefers-color-scheme: dark) {
+      .ask-btn-ghost {
+        background: #3a3a3a;
+        color: #e8eaed;
+      }
+      .ask-btn-ghost:hover:not(:disabled) {
+        background: #464646;
+      }
+    }
+
+    .ask-tip {
+      margin: 12px 0 0;
+      font-size: 12px;
+      color: #9aa0a6;
+      line-height: 1.6;
+    }
+    .ask-tip[hidden] {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <p class="ask-title"><span class="ask-badge">已保存</span>需要裁剪这段视频吗？</p>
+  <p class="ask-desc" id="ask-desc">刚才录制的视频已保存到下载目录。打开编辑器后，可以拖动时间条选取要保留的片段并替换原文件。</p>
+  <p class="ask-file" id="ask-file" title=""></p>
+  <div class="ask-actions">
+    <button id="ask-no" class="ask-btn ask-btn-ghost" type="button">不需要</button>
+    <button id="ask-yes" class="ask-btn ask-btn-primary" type="button" disabled>去裁剪</button>
+  </div>
+  <p class="ask-tip" id="ask-tip">正在读取刚保存的视频…</p>
+  <script src="shared/pending-video.js"></script>
+  <script src="ask.js"></script>
+</body>
+</html>
